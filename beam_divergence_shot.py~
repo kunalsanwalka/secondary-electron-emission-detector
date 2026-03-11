@@ -1,0 +1,248 @@
+"""
+@author: kunal
+
+This program calculates, plots and saves the reconstructed beamlet divergence from a given NBI reference shot.
+"""
+
+import pickle
+import argparse
+import numpy as np
+import scipy as sc
+import MDSplus as mds
+import matplotlib.pyplot as plt
+from astropy.modeling import models, fitting
+from mpl_toolkits.mplot3d import Axes3D
+
+# Make sure the plotting doesn't break
+import matplotlib
+matplotlib.use('TkAgg')
+
+# Make the font size readable
+plt.rcParams.update({'font.size' : 32})
+
+def parseArgs():
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('-shotnum',
+                        type=int)
+
+    parser.add_argument('-savedata',
+                        default = False,
+                        type=bool)
+
+    parser.add_argument('-plotData',
+                        default = True,
+                        type=bool)
+
+    args = parser.parse_args()
+    
+    return args
+
+def dict_to_arrays(detPosDict):
+    """
+    Convert the dictionary to numpy arrays to make going over each detectors
+    positions easier in other functions.
+
+    Parameters
+    ----------
+    detPosDict : dictionary
+        Python dictionary with the detector positions
+    
+    Returns
+    -------
+    machineXPosArr : np.array
+        Machine aligned x-position.
+    machineYPosArr : np.array
+        Machine aligned y-position.
+    machineZPosArr : np.array
+        Machine aligned z-position.
+    beamXPosArr : np.array
+        Beam aligned x-position.
+    beamYPosArr : np.array
+        Beam aligned y-position.
+    beamZPosArr : np.array
+        Beam aligned z-position.
+    beamRPosArr : np.array
+        Beam aligned r-position.
+    """
+    
+    machineXPosArr, machineYPosArr, machineZPosArr, beamXPosArr, beamYPosArr, beamZPosArr, beamRPosArr = [], [], [], [], [], [], []
+    
+    for i in range(detPosDict['numDetectors']):
+        machineXPosArr.append(detPosDict[f'det_{i}_machine_x'])
+        machineYPosArr.append(detPosDict[f'det_{i}_machine_y'])
+        machineZPosArr.append(detPosDict[f'det_{i}_machine_z'])
+        beamXPosArr.append(detPosDict[f'det_{i}_beamAligned_x'])
+        beamYPosArr.append(detPosDict[f'det_{i}_beamAligned_y'])
+        beamZPosArr.append(detPosDict[f'det_{i}_beamAligned_z'])
+        beamRPosArr.append(detPosDict[f'det_{i}_beamAligned_r'])
+        
+    machineXPosArr = np.array(machineXPosArr)
+    machineYPosArr = np.array(machineYPosArr)
+    machineZPosArr = np.array(machineZPosArr)
+    beamXPosArr = np.array(beamXPosArr)
+    beamYPosArr = np.array(beamYPosArr)
+    beamZPosArr = np.array(beamZPosArr)
+    beamRPosArr = np.array(beamRPosArr)
+    
+    return machineXPosArr, machineYPosArr, machineZPosArr, beamXPosArr, beamYPosArr, beamZPosArr, beamRPosArr
+
+def gaussian_2d(xy, A, muX, muY, sigma):
+    """
+    2D gaussian function that has the same standard deviation in both x and y.
+    This is used to fit the data to the shinethru detectors to calculate the
+    width of the NBI.
+    """
+
+    x, y  = xy
+    
+    g = A * np.exp(-(x-muX)**2/(2*(sigma**2)) -(y-muY)**2/(2*(sigma**2)))
+
+    return np.ravel(g)
+
+def analyze_shot(args):
+    
+    #### Load the .npz with the conversion data
+    dataObj = np.load('/home/sanwalka/shinethru/dump_width_to_divergence.npz')
+
+    # Load the arrays in the data object
+    beamletDivergenceArr = dataObj['beamletDivergenceArr']
+    gaussianWidthArr = dataObj['gaussianWidthArr']
+    fitSlope = dataObj['fitSlope']
+    fitIntercept = dataObj['fitIntercept']
+
+    #### Load the data from the shinethru array for this shot
+    tree = mds.Tree('wham', args.shotnum)
+    
+    shinethruData = []
+    timeArr = []
+    for i in range(1, 16):
+
+        dataNode = tree.getNode(f'diag.shinethru.detector_{i:02d}')
+        shinethruData.append(dataNode.getData().data())
+        timeArr = dataNode.dim_of().data() * 1e3 # [ms]
+
+    shinethruData = np.array(shinethruData)
+
+    #### Load the dictionary that contains the detector positions
+    with open('/home/sanwalka/shinethru/see_detector_dictionary.pkl', 'rb') as pklFile:
+        detPosDict = pickle.load(pklFile)
+
+    # Get the beam aligned r-positions of the detectors
+    _, _, _, beamXPosArr, beamYPosArr, beamZPosArr, beamRPosArr = dict_to_arrays(detPosDict)
+
+    # Remove the in-vessel detectors
+    beamRPosArr = beamRPosArr[:-6]
+    beamXPosArr = beamXPosArr[:-6]
+    beamYPosArr = beamYPosArr[:-6]
+    beamZPosArr = beamZPosArr[:-6]
+
+    # The central detector is non-functioning, remove it from the data and the position array
+    beamXPosArr = beamXPosArr[beamRPosArr != 0.0]
+    beamYPosArr = beamYPosArr[beamRPosArr != 0.0]
+    beamZPosArr = beamZPosArr[beamRPosArr != 0.0]
+    beamRPosArr = beamRPosArr[beamRPosArr != 0.0]
+    shinethruData = np.delete(shinethruData, 5, axis=0)
+
+    # Drop the 2nd to last point, the signal from it is always un-characterestically high
+    beamXPosArr = np.delete(beamXPosArr, -2)
+    beamYPosArr = np.delete(beamYPosArr, -2)
+    beamZPosArr = np.delete(beamZPosArr, -2)
+    beamRPosArr = np.delete(beamRPosArr, -2)
+    shinethruData = np.delete(shinethruData, -2, axis=0)
+
+    # Fit a gaussian to every 10th timestep
+    fittedGaussianWidthArr = np.zeros(int(len(timeArr)/10))
+    fittedTimeArr = np.zeros(int(len(timeArr)/10))
+    for i in range(len(fittedGaussianWidthArr)):
+
+        timeIdx = int(i*10)
+        
+        # Get the time and shinethru data for this time-index
+        currTime = timeArr[timeIdx]
+        currSTData = shinethruData[:, timeIdx]
+        fittedTimeArr[i] = currTime
+
+        # If the maximum shinethru data is too small, the NBI is probably not active and the fitting can be skipped
+        if np.max(currSTData < 0.0003):
+            
+            fittedGaussianWidthArr[i] = 0
+            continue
+
+        else:
+
+            # Normalize the data so fitting is easier
+            currSTData /= np.max(currSTData)
+
+            # Fit a 2D maxwellian to the data
+
+            # Initial guess
+            p0 = np.array([1,   # Amplitude
+                           0,   # x-offset
+                           0,   # y-offset
+                           50]) # standard deviation [mm]
+            popt, popv = sc.optimize.curve_fit(gaussian_2d, (beamXPosArr, beamYPosArr), currSTData, p0)
+            
+            fittedGaussianWidthArr[i] = popt[-1]
+            
+            # debug plot
+            if i == 1000:
+
+                fig = plt.figure(figsize=(12, 8))
+                ax = fig.add_subplot(111, projection='3d')
+
+                ax.scatter(beamXPosArr, beamYPosArr, currSTData,
+                           c='r', s=200)
+
+                xPlotting = np.linspace(-200, 200, 200)
+                yPlotting = np.linspace(-200, 200, 200)
+                X, Y = np.meshgrid(xPlotting, yPlotting)
+                surfacePlotting = gaussian_2d((X, Y), *popt).reshape(200, 200)
+
+                ax.plot_surface(X, Y, surfacePlotting,
+                                cmap='inferno',
+                                alpha=0.5)
+
+                ax.set_xlabel('X [mm]')
+                ax.set_ylabel('Y [mm]')
+                ax.set_zlabel('Signal [norm.]')
+                
+                plt.show()
+
+    # Plot the fitted gaussian width vs time and other NBI parameters
+
+    nbiV = tree.getNode('nbi.v_beam').getData().data() / 1e3
+    nbiI = tree.getNode('nbi.i_beam').getData().data()
+
+    fig = plt.figure(figsize=(12, 8), tight_layout=True)
+
+    ax = fig.add_subplot(211)
+    
+    ax.plot(timeArr, nbiV, label='[kV]',
+            color='red', linewidth=3)
+    ax.plot(timeArr, nbiI, label='[A]',
+            color='blue', linewidth=3)
+
+    ax.set_title(f'{args.shotnum}')
+    ax.set_xlim(-5, 25)
+    ax.legend()
+    ax.set_xticks([])
+
+    ax = fig.add_subplot(212)
+    ax.plot(fittedTimeArr, fittedGaussianWidthArr,
+            linewidth=3)
+
+    ax.set_xlabel('Time [ms]')
+    ax.set_ylabel('Beam Width [mm]')
+    ax.set_xlim(-5, 25)
+
+    plt.show()
+    
+    return
+
+if __name__ == '__main__':
+
+    args = parseArgs()
+
+    analyze_shot(args)
