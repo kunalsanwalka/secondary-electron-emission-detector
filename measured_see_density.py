@@ -158,7 +158,7 @@ def calculate_line_densities(args, detDictList):
         lookupTable = np.load('/home/sanwalka/shinethru/lookup_tables/shine_thru_table.npz')
     elif gasType == 'Deuterium':
         lookupTable = np.load('/home/sanwalka/shinethru/lookup_tables/shine_thru_table_d.npz')
-    lookupTable = np.load('/home/sanwalka/shinethru/lookup_tables/shine_thru_table_d.npz')
+    # lookupTable = np.load('/home/sanwalka/shinethru/lookup_tables/shine_thru_table_d.npz')
 
     shineThruTable = lookupTable['shineThruTable']
     lineDensScanArr = lookupTable['lineDensScanArr'] # [m^-2]

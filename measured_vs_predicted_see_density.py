@@ -42,7 +42,7 @@ if __name__ == "__main__":
 
     """
     Sam: If all you want is detDictList to contain the measured and synthetic line integrated densities, you can stop here.
-    
+
     The rest of the code is plotting and calculating 100 forward models of the radial density profile.
     """
 

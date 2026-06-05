@@ -33,7 +33,6 @@ def load_density_profile(densityProfileFilePath, makeplot=False):
     """
     This function loads the density profile from a given .hdf5 file and creates an interpolation function.
 
-    
     Parameters
     ----------
     densityProfileFilePath : str

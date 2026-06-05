@@ -1,0 +1,6 @@
+# Ignore data files
+data/
+*.npz
+*.pkl
+*.h5
+*.nc
