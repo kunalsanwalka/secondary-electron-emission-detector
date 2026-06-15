@@ -4,3 +4,10 @@ data/
 *.pkl
 *.h5
 *.nc
+
+# Ignore plots
+plots/
+*.mp4
+*.png
+*.jpg
+*.pdf

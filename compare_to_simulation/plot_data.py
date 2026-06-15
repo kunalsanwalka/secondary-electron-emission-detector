@@ -251,4 +251,4 @@ if __name__ == '__main__':
 
     # _, _ = calculate_chi2_param(shotnum, 1e3, True)
 
-    # animate_plot(shotnum, savePath=f'/home/sanwalka/shinethru/compare_to_simulation/{shotnum}_animation.mp4')
+    # animate_plot(shotnum, savePath=f'/home/sanwalka/shinethru/plots/{shotnum}_animation.mp4')
