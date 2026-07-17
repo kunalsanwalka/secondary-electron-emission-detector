@@ -241,7 +241,7 @@ def animate_plot(shotnum, savePath=None):
 
 if __name__ == '__main__':
 
-    shotnum = 260507094
+    shotnum = 260309040
 
     # timeToPlot = np.array([7, 8, 9, 10, 11]) * 1e-3
     # timesToPlot = np.array([2, 4, 6, 8, 10, 12]) * 1e-3
