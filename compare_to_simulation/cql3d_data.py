@@ -2,6 +2,7 @@
 This script calculates the line-integrated density for the SEE detectors from a synthetic diagnostic implemented on a CQL3D output file.
 """
 
+import os
 import pickle
 import scipy as sc
 import numpy as np
@@ -18,7 +19,7 @@ plt.rcParams.update({'font.size': 18})
 global plotDest, dataDest
 plotDest = '/home/sanwalka/shinethru/plots/'
 dataDest = '/home/sanwalka/shinethru/data/'
-dataDest = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/second_round/nneut_1e15_gb_1e18_NBI_800kW_ECH_0kW/simulation_results/18.000/components/fp__cql3dm_4/'
+dataDest = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/nneut_1e15_gb_1e18_NBI_800kW_ECH_0kW/simulation_results/18.000/components/fp__cql3dm_4/'
 
 def species_labels(filename):
     """
@@ -269,7 +270,122 @@ def generate_interpolation_functions(filename, makeplot=False):
 
         plt.show()
 
-    return interpFuncList
+    return interpFuncList, time, dens, solrz, solzz
+
+def generate_filename_list(simulationDir):
+
+    # For each simulation, the data is stored under-
+    # [SIMULATION DIR.]/simulation_results/[TIMES]/components/fp__cql3dm_4/WHAM.nc
+    # Here, the times go from 1.000 to X.000 where X is the final timestep. This changes by simulation.
+
+    simulationDir += 'simulation_results/'
+
+    # Find all the directories
+    directories = [
+        d for d in os.listdir(simulationDir) if os.path.isdir(os.path.join(simulationDir, d))
+    ]
+    directories.remove('plasma_state')
+
+    # Sort the directory names by time
+    simTimes = np.array(directories)
+    simTimesFloat = np.array(directories, dtype=float)
+    sortIdx = simTimesFloat.argsort()
+    simTimes = simTimes[sortIdx]
+    simTimesFloat = simTimesFloat[sortIdx]
+
+    filenameList = []
+    for i in range(len(simTimes)):
+
+        filenameCurr = simulationDir+simTimes[i]+'/components/fp__cql3dm_4/WHAM.nc'
+        filenameList.append(filenameCurr)
+
+    return filenameList
+
+def generate_times_and_functions(simulationName):
+    """
+    Generate interpolation functions for the plasma density for every timestep of the simulation.
+
+    Parameters
+    ----------
+    simulationName : str
+        Name of the simulation (same value passed to generate_times_and_functions).
+
+    Returns
+    -------
+    interpFuncs : list of functions
+        Interpolation functions, one per timestep, parallel to `times`.
+    times : np.array
+        Time array [s].
+    """
+
+    # All simulations are stored in the same directory
+    simulationDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/' + simulationName + '/'
+
+    # Try to load the data if it has already been stored
+    try:
+
+        print('Trying to load the saved 2D density profile data')
+
+        with open(simulationDir + 'density_interp_data.pkl', 'rb') as loadFile:
+            saveData = pickle.load(loadFile)
+
+            interpFuncs = [
+                generate_single_interpolation(dens, saveData['solrz'], saveData['solzz'])
+                for dens in saveData['dens']
+            ]
+
+            return interpFuncs, saveData['times']
+    
+    except:
+
+        print('No saved 2D density profile data, loading it from the .nc files')
+
+        # Generate a list of the directories that store the data
+        filenameList = generate_filename_list(simulationDir)
+
+        # Go over each filename and generate the interpolation functions and get the time array
+        interpFuncs = []
+        densList = []
+        solrz = None
+        solzz = None
+        times = np.array([])
+
+        endTime = 0
+
+        for i in range(len(filenameList)):
+
+            print(f'Loading {i+1} of {len(filenameList)}')
+
+            try:
+
+                currFuncs, currTimes, currDens, solrz, solzz = generate_interpolation_functions(filenameList[i])
+                interpFuncs.extend(currFuncs)
+
+                densList.append(currDens)
+
+                times = np.concatenate([times, currTimes+endTime])
+                endTime = times[-1]
+
+            except:
+
+                print(f'Error when loading data from the following directory- \n {filenameList[i]}')
+                continue
+
+        # Save the times and the data needed to rebuild the interpolation functions.
+        saveData = {
+            'dens': np.concatenate(densList, axis=0),
+            'solrz': solrz,
+            'solzz': solzz,
+            'times': times,
+        }
+
+        savePath = simulationDir + 'density_interp_data.pkl'
+        with open(savePath, 'wb') as saveFile:
+            pickle.dump(saveData, saveFile)
+
+        print(f'Saved interpolation data to- \n {savePath}')
+
+        return interpFuncs, times
 
 def load_detector_dictionary(pickleFilePath):
 
@@ -280,11 +396,7 @@ def load_detector_dictionary(pickleFilePath):
 
 def single_detector_see_density(detDict, interpFunc, makeplot=False):
     """
-    This function calculates the predicted density along the line of sight of a single SEE detector and also the line-integrated density at the detector.
-
-    It adds them both to the input dictionary and also plots the density profile and line of sight if makeplot is set to True.
-
-    They are added to the dictionary with the keys 'see_density_along_los' and 'predicted_see_density' respectively.
+    This function calculates the line-integrated density at the detector.
     
     Parameters
     ----------
@@ -297,7 +409,8 @@ def single_detector_see_density(detDict, interpFunc, makeplot=False):
 
     Returns
     -------
-    None. The input dictionary is modified to include the density along the line of sight and the predicted SEE density at the detector.
+    predictedSeeDensity : float
+        Line integrated density along the line-of-sight of the given detector.
     """
 
     # Get the line of sight points for the detector
@@ -316,43 +429,28 @@ def single_detector_see_density(detDict, interpFunc, makeplot=False):
     # Integrate the line-integrated density along the line of sight to get the predicted SEE density at the detector
     predictedSeeDensity = np.trapezoid(densityAlongLos, dx=spacing)
 
-    # Add the density along the line of sight and the predicted SEE density to the dictionary
-    detDict['see_density_along_los'] = densityAlongLos
-    detDict['predicted_see_density'] = predictedSeeDensity
-
-    if makeplot == True:
-
-        fig = plt.figure(figsize=(12, 8), tight_layout=True)
-        ax = fig.add_subplot(111)
-
-        # Plot the density profile
-        rArr = np.linspace(0, 0.5, 100)
-        zArr = np.linspace(-1.5, 1.5, 100)
-        R, Z = np.meshgrid(rArr, zArr)
-
-        points = np.array([R.flatten(), Z.flatten()]).T
-        densityArr = interpFunc(points).reshape(R.shape)
-
-        pltObj = ax.contourf(Z, R, densityArr, levels=100, cmap='inferno')
-
-        cbar = fig.colorbar(pltObj)
-        cbar.set_label('Density [m^-3]')
-
-        # Plot the line of sight of the detector
-        ax.plot(losPoints[1, :], losPoints[0, :], c='white', linewidth=3, label='Line of sight')
-
-        ax.set_xlabel('Z [m]')
-        ax.set_ylabel('R [m]')
-
-        plt.show()
-
-    return detDict
+    return predictedSeeDensity
 
 def synthetic_see_detector(detDictList, interpFunc, makeplot=False):
+    """
+    Calculate the line-integrated density along the line-of-sight for each detector.
+
+    Parameters
+    ----------
+    detDictList : list
+        List of dictionaries defining the detector parameters.
+    interpFunc : function
+        An interpolation function that takes in (r, z) coordinates (in m) and returns the density at that point. [m^-3]
+    makeplot : bool
+        Plot the line-integrated density profile measured by the SEE detectors.
+    """
+
+    # Array to store the line-integrated densities
+    lineIntegratedDensArr = np.zeros(shape=(len(detDictList)))
 
     # Go over each detector in the list and calculate the predicted SEE density at each detector
-    for detDict in detDictList:
-        single_detector_see_density(detDict, interpFunc)
+    for i in range(len(detDictList)):
+        lineIntegratedDensArr[i] = single_detector_see_density(detDictList[i], interpFunc)
 
     if makeplot == True:
 
@@ -360,17 +458,98 @@ def synthetic_see_detector(detDictList, interpFunc, makeplot=False):
         fig = plt.figure(figsize=(12, 8), tight_layout=True)
         ax = fig.add_subplot(111)
 
-        predictedDensities = [detDict['predicted_see_density'] for detDict in detDictList]
         impactParams = [detDict['impact_param_vertical'] for detDict in detDictList]
 
-        ax.scatter(impactParams, predictedDensities, c='red', s=200)
+        ax.scatter(impactParams, lineIntegratedDensArr, c='red', s=200)
 
         ax.set_ylabel(r'Predicted SEE density [m$^{-2}$]')
         ax.set_xlabel('Impact parameter [mm]')
 
         plt.show()
 
-    return detDictList
+    return lineIntegratedDensArr
+
+def time_dependent_see_detector(simulationName, makeplot=False):
+
+    # All simulations are stored in the same directory
+    simulationDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/' + simulationName + '/'
+
+    # Load the SEE detector dictionary
+    with open('/home/sanwalka/shinethru/lookup_tables/see_detector_dictionary.pkl', 'rb') as pickleFile:
+        detDictList = pickle.load(pickleFile)
+
+    # Load the saved data if it already exists
+    try:
+
+        print('Trying to load the synthetic detector data.')
+
+        dataObj = np.load(simulationDir + 'synthetic_detector_data.npz')
+
+        syntheticSignal = dataObj['syntheticSignal']
+        times = dataObj['times']
+
+    except:
+
+        print('No saved synthetic detector data present, generating it.')
+
+        # Load all the interpolation functions
+        interpFuncs, times = generate_times_and_functions(simulationName)
+
+        # Array to store the time dependent SEE signals
+        # [Time x Detector Number]
+        syntheticSignal = np.zeros(shape=(len(times), len(detDictList)))
+
+        for i in range(len(times)):
+
+            # print(f'Calculating the signal for {times[i]*1e3:.2f}ms')
+            syntheticSignal[i] = synthetic_see_detector(detDictList, interpFuncs[i])
+
+        #### Save the data
+
+        np.savez(simulationDir + 'synthetic_detector_data.npz',
+                 syntheticSignal = syntheticSignal,
+                 times = times)
+
+    if makeplot:
+
+        impactParams = np.array([detDict['impact_param_vertical'] for detDict in detDictList])
+        sortIdx = np.argsort(impactParams)
+        impactParams = impactParams[sortIdx]
+
+        # Color each time point on a colormap
+        cmap = plt.get_cmap('viridis', len(times)).colors
+
+        fig = plt.figure(figsize=(12, 8), tight_layout=True)
+        ax = fig.add_subplot(111)
+
+        fig.suptitle(simulationName)
+
+        currTime = 0
+        for i in range(len(times)):
+
+            # Only plot every 0.25ms
+            if times[i] - currTime <= 2.5e-4:
+                continue
+
+            currTime = times[i]
+            
+            ax.scatter(impactParams, syntheticSignal[i][sortIdx], 
+                       color=cmap[i],
+                       s=200)
+            
+            ax.plot(impactParams, syntheticSignal[i][sortIdx], 
+                       color=cmap[i],
+                       linewidth=2,
+                       label=f'{times[i]*1e3:.2f}')
+            
+        ax.legend(title='Times [ms]', ncols=2)
+
+        ax.set_ylabel(r'Predicted SEE density [m$^{-2}$]')
+        ax.set_xlabel('Vertical Impact Parameter [mm]')
+
+        plt.show()
+            
+    return syntheticSignal, times
 
 if __name__ == '__main__':
 
@@ -378,12 +557,14 @@ if __name__ == '__main__':
     with open('/home/sanwalka/shinethru/lookup_tables/see_detector_dictionary.pkl', 'rb') as pickleFile:
         detDictList = pickle.load(pickleFile)
 
-    # Generate the density interpolation function
-    filename = dataDest + '230222_newFusDiag.nc'
-    filename = dataDest + 'WHAM.nc'
+    # Simulation directory
+    simulationName = 'nneut_1e15_gb_1e18_NBI_800kW_ECH_0kW'
 
-    # _, _, _, _ = ion_dens(filename, makeplot=True)
-    interpFuncList = generate_interpolation_functions(filename, makeplot=True)
+    # Load all the interpolation functions
+    # interpFuncs, times = generate_times_and_functions(simulationName)
 
-    # Add the synthetic data to the dictionary
-    # detDictList = synthetic_see_detector(detDictList, interpFunc, makeplot=True)
+    # Check the synthetic diagnostic at a given timepoint
+    # lineIntegratedDensArr = synthetic_see_detector(detDictList, interpFuncs[-1], True)
+
+    # Generate the data for the time dependent synthetic detector
+    syntheticSignal, times = time_dependent_see_detector(simulationName, True)
