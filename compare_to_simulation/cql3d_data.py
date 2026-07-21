@@ -3,7 +3,9 @@ This script calculates the line-integrated density for the SEE detectors from a 
 """
 
 import os
+import sys
 import pickle
+import subprocess
 import scipy as sc
 import numpy as np
 import xarray as xr
@@ -443,6 +445,11 @@ def synthetic_see_detector(detDictList, interpFunc, makeplot=False):
         An interpolation function that takes in (r, z) coordinates (in m) and returns the density at that point. [m^-3]
     makeplot : bool
         Plot the line-integrated density profile measured by the SEE detectors.
+
+    Returns
+    -------
+    lineIntegratedDensArr : np.array
+        Line-integrated plasma density for each detector [m^-2]
     """
 
     # Array to store the line-integrated densities
@@ -469,14 +476,32 @@ def synthetic_see_detector(detDictList, interpFunc, makeplot=False):
 
     return lineIntegratedDensArr
 
-def time_dependent_see_detector(simulationName, makeplot=False):
+def time_dependent_see_detector(simulationName, detDictList, makeplot=False, timeDelta=1e-3):
+    """
+    Run a full synthetic SEE diagnostic on the simulation.
+
+    Parameters
+    ----------
+    simulationName : str
+        Name of the simulation
+    detDistList : list
+        List of dictionaries with the detector parameters
+    makeplot : bool
+        Plot the synthetic diagnostic data
+    timeDelta : float
+        TIme interval between plots of the radial profiles. [s]
+
+    Returns
+    -------
+    detDictList : list
+        List of dictionaries with the synthetic simulation data added to it.
+        This function adds the following keys to each dictionary
+        ['simulated_signal'] = Calculated line-integrated density associated with the given detector [m^-2]
+        ['simulated_signal_time'] = Corresponding time array [s]
+    """
 
     # All simulations are stored in the same directory
     simulationDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/' + simulationName + '/'
-
-    # Load the SEE detector dictionary
-    with open('/home/sanwalka/shinethru/lookup_tables/see_detector_dictionary.pkl', 'rb') as pickleFile:
-        detDictList = pickle.load(pickleFile)
 
     # Load the saved data if it already exists
     try:
@@ -510,46 +535,437 @@ def time_dependent_see_detector(simulationName, makeplot=False):
                  syntheticSignal = syntheticSignal,
                  times = times)
 
+    # Put the data into the dictionaries
+    for i in range(len(detDictList)):
+
+        detDictList[i]['simulated_signal'] = syntheticSignal[:, i]
+        detDictList[i]['simulated_signal_time'] = times
+
     if makeplot:
 
         impactParams = np.array([detDict['impact_param_vertical'] for detDict in detDictList])
         sortIdx = np.argsort(impactParams)
         impactParams = impactParams[sortIdx]
 
+        xLim = np.abs(impactParams).max()
+
         # Color each time point on a colormap
         cmap = plt.get_cmap('viridis', len(times)).colors
 
-        fig = plt.figure(figsize=(12, 8), tight_layout=True)
-        ax = fig.add_subplot(111)
-
+        fig = plt.figure(figsize=(10, 10), tight_layout=True)
         fig.suptitle(simulationName)
+
+        # Synthetic detector
+        ax1 = fig.add_subplot(211)
+
+        currTime = 0
+        for i in range(len(times)):
+
+            # Only plot every timeDelta
+            if times[i] - currTime <= timeDelta:
+                continue
+
+            currTime = times[i]
+            
+            ax1.scatter(impactParams, syntheticSignal[i][sortIdx], 
+                        color = cmap[i],
+                        s = 200)
+            
+            ax1.plot(impactParams, syntheticSignal[i][sortIdx], 
+                     color = cmap[i],
+                     linewidth = 2,
+                     label = f'{times[i]*1e3:.2f}')
+            
+        ax1.legend(title='Times [ms]', ncols=2)
+
+        ax1.set_ylabel(r'Predicted SEE density [m$^{-2}$]')
+        ax1.set_xlabel('Vertical Impact Parameter [mm]')
+
+        ax1.set_xlim(-xLim, xLim)
+        ax1.set_ylim(0, None)
+
+        # Radial density profile
+        ax2 = fig.add_subplot(212)
+
+        # Load the density profile data itself
+        interpFuncs, _ = generate_times_and_functions(simulationName)
+
+        radialValues = np.linspace(-xLim/1e3, xLim/1e3, 100)
+        zValues = np.zeros_like(radialValues)
+        points = np.array([np.abs(radialValues), zValues]).T
 
         currTime = 0
         for i in range(len(times)):
 
             # Only plot every 0.25ms
-            if times[i] - currTime <= 2.5e-4:
+            if times[i] - currTime <= timeDelta:
                 continue
 
             currTime = times[i]
-            
-            ax.scatter(impactParams, syntheticSignal[i][sortIdx], 
-                       color=cmap[i],
-                       s=200)
-            
-            ax.plot(impactParams, syntheticSignal[i][sortIdx], 
-                       color=cmap[i],
-                       linewidth=2,
-                       label=f'{times[i]*1e3:.2f}')
-            
-        ax.legend(title='Times [ms]', ncols=2)
 
-        ax.set_ylabel(r'Predicted SEE density [m$^{-2}$]')
-        ax.set_xlabel('Vertical Impact Parameter [mm]')
+            radialDensity = interpFuncs[i](points)
+
+            ax2.plot(radialValues*1e3, radialDensity,
+                     linewidth = 2,
+                     color = cmap[i])
+            
+        ax2.set_xlabel('Vertical Impact Parameter [mm]')
+        ax2.set_ylabel(r'Radial Density Profile [m$^{-3}$]')
+
+        ax2.set_xlim(-xLim, xLim)
+        ax2.set_ylim(0, None)
 
         plt.show()
             
-    return syntheticSignal, times
+    return detDictList
+
+def load_experimental_data(shotnum, makeplot=False):
+    """
+    Calculates the experimental data for a given shot number.
+
+    Parameters
+    ----------
+    shotnum : int
+        Shot number for which we want to calculate the line-integrated plasma density.
+    makeplot : bool
+        Make a plot of the experimental data
+
+    Returns
+    -------
+    detDictList : list
+        List of dictionaries that contains the detector information AND the experimentally calculated line-integrated plasma density. [m^-2]
+    """
+
+    savename = f'/home/sanwalka/shinethru/data/{shotnum}.pkl'
+
+    # Try to load the data if it already exists
+    try:
+
+        print(f'Trying to load the experimental data for shot {shotnum}')
+
+        with open(savename, 'rb') as file:
+            detDictList = pickle.load(file)
+
+        if makeplot:
+
+            # Detector impact parameters [m]
+            impactParams = np.zeros(len(detDictList))
+            for i in range(len(impactParams)):
+
+                beam_pos = detDictList[i]['impact_param_vertical']
+                impactParams[i] = beam_pos / 1e3
+
+            # Get the line integrated densities and time array for each detector
+            densList = []
+            densErrList = []
+            timeArr2D = []
+            dataPresent = []
+            for i in range(len(impactParams)):
+
+                lineIntegratedDens = detDictList[i]['line_integrated_density']
+
+                if lineIntegratedDens is not None:
+                    densList.append(detDictList[i]['line_integrated_density'])
+                    densErrList.append(detDictList[i]['line_integrated_density_sigma'])
+                    timeArr2D.append(detDictList[i]['time_arr_slow'])
+                    dataPresent.append(True)
+                else:
+                    dataPresent.append(False)
+
+            # Remove the impact parameter with no data
+            impactParams = impactParams[dataPresent]
+
+            # Sort the data based on impactParams
+            sortIdx = np.argsort(impactParams)
+            impactParams = impactParams[sortIdx]
+            timeArr2D = [timeArr2D[i] for i in sortIdx]
+            densList = [densList[i] for i in sortIdx]
+            densErrList = [densErrList[i] for i in sortIdx]
+
+            # Remove the 1st detector (railed, broken)
+            impactParams = impactParams[1:]
+            timeArr2D = timeArr2D[1:]
+            densList = densList[1:]
+            densErrList = densErrList[1:]
+
+            # Put all the data on the same time axis
+            minFinalTime = 1e6
+            minTimeIdx = 0
+            for i in range(len(timeArr2D)):
+
+                finalTime = timeArr2D[i][-1]
+                if finalTime <= minFinalTime:
+                    finalTime = minFinalTime
+                    minTimeIdx = i
+
+            timeArr = timeArr2D[minTimeIdx]
+
+            densArr2D = np.zeros(shape=(len(densList), len(timeArr)))
+            densErrArr2D = np.zeros(shape=(len(densList), len(timeArr)))
+
+            for i in range(len(densList)):
+
+                densArr2D[i] = np.interp(timeArr, timeArr2D[i], densList[i])
+                densErrArr2D[i] = np.interp(timeArr, timeArr2D[i], densErrList[i])
+
+            fig = plt.figure(figsize=(12, 8), tight_layout=True)
+            ax = fig.add_subplot(111)
+
+            fig.suptitle(shotnum)
+
+            timeDelta = 1e-3
+
+            # Color each time point on a colormap
+            cmap = plt.get_cmap('viridis', len(timeArr)).colors
+
+            # Plot each timepoint
+            currTime = timeArr[0]
+            for i in range(len(timeArr)):
+
+                if timeArr[i] - currTime <= timeDelta:
+                    continue
+
+                currTime = timeArr[i]
+
+                ax.errorbar(impactParams*1e2, densArr2D[:, i], 
+                            yerr = densErrArr2D[:, i],
+                            fmt = 'o',
+                            ms = 10,
+                            color = cmap[i],
+                            elinewidth = 5,
+                            label = f'{np.round(timeArr[i]*1e3, 1)}')
+                ax.errorbar(impactParams*1e2, densArr2D[:, i], 
+                            yerr = 3*densErrArr2D[:, i],
+                            fmt = 'o',
+                            ms = 10,
+                            color = cmap[i])
+                ax.plot(impactParams*1e2, densArr2D[:, i],
+                        linewidth=2,
+                        color=cmap[i])
+
+            ax.legend(title='Time [ms]', ncols=3)
+            ax.set_xlabel('Impact Parameter [cm]')
+            ax.set_ylabel(r'$\int n_p \cdot dl$ [m$^{-2}$]')
+
+            ax.set_ylim(0, None)
+            ax.set_xlim(-np.max(np.abs(impactParams*1e2))*1.1, np.max(np.abs(impactParams*1e2))*1.1)
+
+            plt.show()
+
+    except Exception as e:
+
+        print(e)
+
+        print('Experimental data was not calculated. Computing now.')
+
+        # Calculate with plotting
+        if makeplot:
+            subprocess.run([sys.executable, "experimental_data.py", "-s", f"{shotnum}", "-plot", "True"])
+
+        else:
+            subprocess.run([sys.executable, "experimental_data.py", "-s", f"{shotnum}"])
+
+        with open(savename, 'rb') as file:
+            detDictList = pickle.load(file)
+
+    return detDictList
+
+def single_time_comparison(expDataArr, expDataSigmaArr, simDataArr, impactParams, expTime, simTime):
+    """
+    Compares the simulation and experimental data and returns a single comparison metric.
+
+    Parameters
+    ----------
+    expDataArr : np.array
+        Line-integrated density from the experiment. [m^-2]
+    expDataSigmaArr : np.array
+        Error bars for the line-integrated density. [m^-2]
+    simDataArr : np.array
+        Line-integrated density from the simulation. [m^-2]
+    impactParams : np.array
+        Vertical impact parameter for each detector. [m]
+    expTime : float
+        Time for the experimental data. [s]
+    simTime : float
+        Time for the simulation data. [s]
+
+    Returns
+    -------
+    comparison : float
+        Metric that compares the simulation and experimental data.
+    """
+
+    # Normalize the data
+    expNorm = expDataArr.max()
+    expDataArr /= expNorm
+    expDataSigmaArr /= expNorm
+
+    simNorm = simDataArr.max()
+    simDataArr /= simNorm
+
+    # Difference between the simulation and experiment
+    diff = expDataArr - simDataArr
+
+    # Root-squared of the difference
+    rsDiff = (diff**2)**0.5
+
+    # Weight it by the error bars
+    weights = 1/expDataSigmaArr
+
+    comparison = np.sum(rsDiff * weights)
+
+    return comparison
+
+def compare_simulation_and_experiment(simulationName, shotnum, makeplot=False):
+    """
+    Compare the plasma density profiles between the CQL3D + KN1D simulation and the experimental result
+
+    Paramters
+    ---------
+    simulationName : str
+        Simulation name we want to compare against.
+    shotnum : int
+        Shot number we want to compare against.
+    makeplot : bool
+        Plot the comparison
+    """
+
+    # Load the experimental data
+    detDictList = load_experimental_data(shotnum)
+
+    # Load the simulation result
+    detDictList = time_dependent_see_detector(simulationName, detDictList)
+
+    # Detector impact parameters [m]
+    impactParams = np.zeros(len(detDictList))
+    for i in range(len(impactParams)):
+
+        beam_pos = detDictList[i]['impact_param_vertical']
+        impactParams[i] = beam_pos / 1e3
+
+    #### Put the experimental data into a 2D numpy array
+
+    # Load the experimental data
+    expTimeArr = []
+    expDataArr = []
+    expDataSigmaArr = []
+    dataPresent = []
+    for i in range(len(impactParams)):
+
+        lineIntegratedDens = detDictList[i]['line_integrated_density']
+
+        if lineIntegratedDens is not None:
+            expDataArr.append(detDictList[i]['line_integrated_density'])
+            expDataSigmaArr.append(detDictList[i]['line_integrated_density_sigma'])
+            expTimeArr.append(detDictList[i]['time_arr_slow'])
+            dataPresent.append(True)
+        else:
+            dataPresent.append(False)
+
+    # Get the final time for each detector
+    finalTime = 1e5
+    shortestTimeIdx = 0
+    for i in range(len(expTimeArr)):
+        
+        currFinalTime = expTimeArr[i].max()
+        
+        if finalTime > currFinalTime:
+            finalTime = currFinalTime
+            shortestTimeIdx = i
+
+    # Common time array for the experimental data
+    expTimeArrNew = expTimeArr[shortestTimeIdx]
+
+    # Put all the experimental data on the same timebase
+    expDataArrNew = []
+    expDataSigmaArrNew = []
+    for i in range(len(expDataArr)):
+
+        expDataArrNew.append(np.interp(expTimeArrNew, expTimeArr[i], expDataArr[i]))
+        expDataSigmaArrNew.append(np.interp(expTimeArrNew, expTimeArr[i], expDataSigmaArr[i]))
+
+    # Convert to numpy as rename
+    expTimeArr = np.array(expTimeArrNew)
+    expDataArr = np.array(expDataArrNew)
+    expDataArr = np.array(expDataArrNew)
+    expDataSigmaArr = np.array(expDataSigmaArrNew)
+
+    #### Put the simulation data into a 2D numpy array
+    simTimeArr = detDictList[0]['simulated_signal_time']
+    
+    simDataArr = np.zeros(shape=(len(detDictList), len(simTimeArr)))
+    for i in range(len(detDictList)):
+
+        simDataArr[i] = detDictList[i]['simulated_signal']
+
+    # Remove the simulation data from the non-functioning detector
+    simDataArr = simDataArr[dataPresent]
+
+    # Remove the non-functioning impact parameter
+    impactParams = impactParams[dataPresent]
+
+    # Sort the data based on impactParams
+    sortIdx = np.argsort(impactParams)
+    
+    impactParams = impactParams[sortIdx]
+    simDataArr = simDataArr[sortIdx]
+    expDataArr = expDataArr[sortIdx]
+    expDataSigmaArr = expDataSigmaArr[sortIdx]
+
+    # Remove the 1st detector (railed/broken)
+    impactParams = impactParams[1:]
+    simDataArr = simDataArr[1:]
+    expDataArr = expDataArr[1:]
+    expDataSigmaArr = expDataSigmaArr[1:]
+
+    # Array to compare the simulation and experimental data
+    # [simTime x expTime]
+    comparisonArr = np.zeros(shape=(len(simTimeArr), len(expTimeArr)))
+
+    # Go over each time point and calculate the comparison
+    for i in range(len(simTimeArr)):
+        for j in range(len(expTimeArr)):
+
+            comparisonArr[i, j] = single_time_comparison(expDataArr = expDataArr[:, j],
+                                                         expDataSigmaArr = expDataSigmaArr[:, j],
+                                                         simDataArr = simDataArr[:, i],
+                                                         impactParams = impactParams,
+                                                         expTime = expTimeArr[j],
+                                                         simTime = simTimeArr[i])
+            
+    if makeplot:
+
+        import matplotlib.ticker as ticker
+
+        # Plot the comparison
+        fig = plt.figure(figsize=(12, 8), tight_layout=True)
+        ax = fig.add_subplot(111)
+
+        X, Y = np.meshgrid(expTimeArr*1e3, simTimeArr*1e3)
+
+        # Define explicit log-spaced levels
+        vmin = max(1e-5, comparisonArr.min())  # Avoid zeros/negatives
+        vmax = comparisonArr.max()
+        logLevels = np.logspace(np.log10(vmin), np.log10(vmax), 100)
+
+        pltObj = ax.contourf(X, Y, comparisonArr, 
+                            levels = logLevels,
+                            locator = ticker.LogLocator(),
+                            cmap = 'viridis')
+
+        ax.set_xlabel('Experimental Time [ms]')
+        ax.set_ylabel('Simulation Time [ms]')
+
+        ax.set_title(f'{shotnum} vs {simulationName}')
+
+        cbar = fig.colorbar(pltObj)
+        cbar.locator = ticker.LogLocator(base=10.0, numticks=10)
+        cbar.update_ticks()
+        cbar.set_label("Comparison", rotation=90, labelpad=15)
+
+        plt.show()
+
+    return
 
 if __name__ == '__main__':
 
@@ -558,7 +974,12 @@ if __name__ == '__main__':
         detDictList = pickle.load(pickleFile)
 
     # Simulation directory
-    simulationName = 'nneut_1e15_gb_1e18_NBI_800kW_ECH_0kW'
+    simulationName = 'nneut_2e17_gb_2e17_NBI_800kW_ECH_0kW'
+    # Shot number
+    shotnum = 260426037
+
+    # Load the experimental data for a given shot
+    # detDictList = load_experimental_data(shotnum, True)
 
     # Load all the interpolation functions
     # interpFuncs, times = generate_times_and_functions(simulationName)
@@ -567,4 +988,7 @@ if __name__ == '__main__':
     # lineIntegratedDensArr = synthetic_see_detector(detDictList, interpFuncs[-1], True)
 
     # Generate the data for the time dependent synthetic detector
-    syntheticSignal, times = time_dependent_see_detector(simulationName, True)
+    detDictList = time_dependent_see_detector(simulationName, detDictList, True)
+
+    # Compare simulation to experiment
+    # compare_simulation_and_experiment(simulationName, shotnum, makeplot=True)
