@@ -11,6 +11,7 @@ import numpy as np
 import xarray as xr
 import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
+from scipy.interpolate import NearestNDInterpolator
 
 # Use TkAgg backend for interactive plotting
 plt.switch_backend('TkAgg')
@@ -188,10 +189,42 @@ def generate_single_interpolation(plasmaDens, solrz, solzz, makeplot=False):
     triangulation = mtri.Triangulation(zVals, rVals, triangles)
     triInterp = mtri.LinearTriInterpolator(triangulation, densVals)
 
+    # The SOL flux-surface mesh doesn't extend to the magnetic axis, so
+    # small-r queries near the axis fall outside every triangle even though
+    # they are physically "inside" the plasma. Flux surfaces are nested, so
+    # whichever radial row has the smaller mean r is the innermost boundary
+    # of the mesh at every z; use it to tell that near-axis hole apart from
+    # points that are genuinely outside the mesh (e.g. beyond the outer
+    # wall), where returning 0 is correct.
+    innerRow = 0 if np.mean(solrz_full[0, :]) < np.mean(solrz_full[-1, :]) else -1
+    sortIdx = np.argsort(solzz_full[innerRow, :])
+    zBoundary = solzz_full[innerRow, :][sortIdx]
+    rBoundary = solrz_full[innerRow, :][sortIdx]
+
+    nearestInterp = NearestNDInterpolator(np.column_stack((rVals, zVals)), densVals)
+
     def interpFunc(points):
         points = np.atleast_2d(points)
-        densQ = triInterp(points[:, 1], points[:, 0])
-        return np.ma.filled(densQ, 0.0)
+        rQ = points[:, 0]
+        zQ = points[:, 1]
+
+        densQ = triInterp(zQ, rQ)
+        invalid = np.ma.getmaskarray(densQ)
+        densQ = np.ma.filled(densQ, 0.0)
+
+        if np.any(invalid):
+
+            # Of the invalid points, find the ones inside the near-axis hole
+            # (r below the innermost meshed flux surface at that z) and fill
+            # them in with the nearest available data instead of 0.
+            rInnerBoundary = np.interp(zQ[invalid], zBoundary, rBoundary)
+            insideHole = invalid.copy()
+            insideHole[invalid] = rQ[invalid] < rInnerBoundary
+
+            if np.any(insideHole):
+                densQ[insideHole] = nearestInterp(rQ[insideHole], zQ[insideHole])
+
+        return densQ
 
     if makeplot == True:
 
@@ -506,7 +539,7 @@ def time_dependent_see_detector(simulationName, detDictList, makeplot=False, tim
     # Load the saved data if it already exists
     try:
 
-        print('Trying to load the synthetic detector data.')
+        print(f'Trying to load the synthetic detector data for {simulationName}')
 
         dataObj = np.load(simulationDir + 'synthetic_detector_data.npz')
 
@@ -816,7 +849,7 @@ def single_time_comparison(expDataArr, expDataSigmaArr, simDataArr, impactParams
 
     return comparison
 
-def compare_simulation_and_experiment(simulationName, shotnum, makeplot=False):
+def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=False, makeplot=False, tExpStart=None, tExpStop=None):
     """
     Compare the plasma density profiles between the CQL3D + KN1D simulation and the experimental result
 
@@ -826,112 +859,170 @@ def compare_simulation_and_experiment(simulationName, shotnum, makeplot=False):
         Simulation name we want to compare against.
     shotnum : int
         Shot number we want to compare against.
+    redoAnalysis : bool
+        Force redo of the analysis even if there is saved data.
+        Default is False.
     makeplot : bool
-        Plot the comparison
+        Plot the comparison.
+        Default is False
+    tExpStart : float
+        Start time of the experimental data for plotting. [s]
+        Default is None.
+    tExpStop : float
+        Stop time of the experimental data for plotting. [s]
+        Default is None.
+
+    Returns
+    -------
+    comparisonArr : np.array
+        Comparison between the simulation and experiment.
+        [simulation time x experimental time]
+    simTimeArr : np.array
+        Corresponding simulation time. [s]
+    expTimeArr : np.array
+        Corresponding experimental time. [s]
     """
 
-    # Load the experimental data
-    detDictList = load_experimental_data(shotnum)
+    # All simulations are stored in the same directory
+    simulationDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/' + simulationName + '/'
 
-    # Load the simulation result
-    detDictList = time_dependent_see_detector(simulationName, detDictList)
+    try:
 
-    # Detector impact parameters [m]
-    impactParams = np.zeros(len(detDictList))
-    for i in range(len(impactParams)):
+        if redoAnalysis:
+            raise Exception('Forcing redo of the analysis')
 
-        beam_pos = detDictList[i]['impact_param_vertical']
-        impactParams[i] = beam_pos / 1e3
+        print(f'Trying to load the comparison between shot {shotnum} and simulation {simulationName}')
 
-    #### Put the experimental data into a 2D numpy array
+        # Open the comparison file for the given shot
+        filename = simulationDir + f'shot_comparison/{shotnum}.npz'
 
-    # Load the experimental data
-    expTimeArr = []
-    expDataArr = []
-    expDataSigmaArr = []
-    dataPresent = []
-    for i in range(len(impactParams)):
+        dataObj = np.load(filename)
 
-        lineIntegratedDens = detDictList[i]['line_integrated_density']
+        comparisonArr = dataObj['comparisonArr']
+        simTimeArr = dataObj['simTimeArr']
+        expTimeArr = dataObj['expTimeArr']
 
-        if lineIntegratedDens is not None:
-            expDataArr.append(detDictList[i]['line_integrated_density'])
-            expDataSigmaArr.append(detDictList[i]['line_integrated_density_sigma'])
-            expTimeArr.append(detDictList[i]['time_arr_slow'])
-            dataPresent.append(True)
-        else:
-            dataPresent.append(False)
+    except Exception as e:
 
-    # Get the final time for each detector
-    finalTime = 1e5
-    shortestTimeIdx = 0
-    for i in range(len(expTimeArr)):
+        print(e)
+        print('Comparison data not saved. Generating it.')
+
+        # Load the experimental data
+        detDictList = load_experimental_data(shotnum)
+
+        # Load the simulation result
+        detDictList = time_dependent_see_detector(simulationName, detDictList)
+
+        # Detector impact parameters [m]
+        impactParams = np.zeros(len(detDictList))
+        for i in range(len(impactParams)):
+
+            beam_pos = detDictList[i]['impact_param_vertical']
+            impactParams[i] = beam_pos / 1e3
+
+        #### Put the experimental data into a 2D numpy array
+
+        # Load the experimental data
+        expTimeArr = []
+        expDataArr = []
+        expDataSigmaArr = []
+        dataPresent = []
+        for i in range(len(impactParams)):
+
+            lineIntegratedDens = detDictList[i]['line_integrated_density']
+
+            if lineIntegratedDens is not None:
+                expDataArr.append(detDictList[i]['line_integrated_density'])
+                expDataSigmaArr.append(detDictList[i]['line_integrated_density_sigma'])
+                expTimeArr.append(detDictList[i]['time_arr_slow'])
+                dataPresent.append(True)
+            else:
+                dataPresent.append(False)
+
+        # Get the final time for each detector
+        finalTime = 1e5
+        shortestTimeIdx = 0
+        for i in range(len(expTimeArr)):
+            
+            currFinalTime = expTimeArr[i].max()
+            
+            if finalTime > currFinalTime:
+                finalTime = currFinalTime
+                shortestTimeIdx = i
+
+        # Common time array for the experimental data
+        expTimeArrNew = expTimeArr[shortestTimeIdx]
+
+        # Put all the experimental data on the same timebase
+        expDataArrNew = []
+        expDataSigmaArrNew = []
+        for i in range(len(expDataArr)):
+
+            expDataArrNew.append(np.interp(expTimeArrNew, expTimeArr[i], expDataArr[i]))
+            expDataSigmaArrNew.append(np.interp(expTimeArrNew, expTimeArr[i], expDataSigmaArr[i]))
+
+        # Convert to numpy as rename
+        expTimeArr = np.array(expTimeArrNew)
+        expDataArr = np.array(expDataArrNew)
+        expDataArr = np.array(expDataArrNew)
+        expDataSigmaArr = np.array(expDataSigmaArrNew)
+
+        #### Put the simulation data into a 2D numpy array
+        simTimeArr = detDictList[0]['simulated_signal_time']
         
-        currFinalTime = expTimeArr[i].max()
+        simDataArr = np.zeros(shape=(len(detDictList), len(simTimeArr)))
+        for i in range(len(detDictList)):
+
+            simDataArr[i] = detDictList[i]['simulated_signal']
+
+        # Remove the simulation data from the non-functioning detector
+        simDataArr = simDataArr[dataPresent]
+
+        # Remove the non-functioning impact parameter
+        impactParams = impactParams[dataPresent]
+
+        # Sort the data based on impactParams
+        sortIdx = np.argsort(impactParams)
         
-        if finalTime > currFinalTime:
-            finalTime = currFinalTime
-            shortestTimeIdx = i
+        impactParams = impactParams[sortIdx]
+        simDataArr = simDataArr[sortIdx]
+        expDataArr = expDataArr[sortIdx]
+        expDataSigmaArr = expDataSigmaArr[sortIdx]
 
-    # Common time array for the experimental data
-    expTimeArrNew = expTimeArr[shortestTimeIdx]
+        # Remove the 1st detector (railed/broken)
+        impactParams = impactParams[1:]
+        simDataArr = simDataArr[1:]
+        expDataArr = expDataArr[1:]
+        expDataSigmaArr = expDataSigmaArr[1:]
 
-    # Put all the experimental data on the same timebase
-    expDataArrNew = []
-    expDataSigmaArrNew = []
-    for i in range(len(expDataArr)):
+        # Array to compare the simulation and experimental data
+        # [simTime x expTime]
+        comparisonArr = np.zeros(shape=(len(simTimeArr), len(expTimeArr)))
 
-        expDataArrNew.append(np.interp(expTimeArrNew, expTimeArr[i], expDataArr[i]))
-        expDataSigmaArrNew.append(np.interp(expTimeArrNew, expTimeArr[i], expDataSigmaArr[i]))
+        # Go over each time point and calculate the comparison
+        for i in range(len(simTimeArr)):
+            for j in range(len(expTimeArr)):
 
-    # Convert to numpy as rename
-    expTimeArr = np.array(expTimeArrNew)
-    expDataArr = np.array(expDataArrNew)
-    expDataArr = np.array(expDataArrNew)
-    expDataSigmaArr = np.array(expDataSigmaArrNew)
+                comparisonArr[i, j] = single_time_comparison(expDataArr = expDataArr[:, j],
+                                                            expDataSigmaArr = expDataSigmaArr[:, j],
+                                                            simDataArr = simDataArr[:, i],
+                                                            impactParams = impactParams,
+                                                            expTime = expTimeArr[j],
+                                                            simTime = simTimeArr[i])
+                
+        #### Save the data
 
-    #### Put the simulation data into a 2D numpy array
-    simTimeArr = detDictList[0]['simulated_signal_time']
-    
-    simDataArr = np.zeros(shape=(len(detDictList), len(simTimeArr)))
-    for i in range(len(detDictList)):
+        # Make the directory if it does not exist
+        filename = simulationDir + 'shot_comparison'
+        os.makedirs(filename, exist_ok=True)
 
-        simDataArr[i] = detDictList[i]['simulated_signal']
+        # Save the data
+        filename = simulationDir + f'shot_comparison/{shotnum}.npz'
 
-    # Remove the simulation data from the non-functioning detector
-    simDataArr = simDataArr[dataPresent]
-
-    # Remove the non-functioning impact parameter
-    impactParams = impactParams[dataPresent]
-
-    # Sort the data based on impactParams
-    sortIdx = np.argsort(impactParams)
-    
-    impactParams = impactParams[sortIdx]
-    simDataArr = simDataArr[sortIdx]
-    expDataArr = expDataArr[sortIdx]
-    expDataSigmaArr = expDataSigmaArr[sortIdx]
-
-    # Remove the 1st detector (railed/broken)
-    impactParams = impactParams[1:]
-    simDataArr = simDataArr[1:]
-    expDataArr = expDataArr[1:]
-    expDataSigmaArr = expDataSigmaArr[1:]
-
-    # Array to compare the simulation and experimental data
-    # [simTime x expTime]
-    comparisonArr = np.zeros(shape=(len(simTimeArr), len(expTimeArr)))
-
-    # Go over each time point and calculate the comparison
-    for i in range(len(simTimeArr)):
-        for j in range(len(expTimeArr)):
-
-            comparisonArr[i, j] = single_time_comparison(expDataArr = expDataArr[:, j],
-                                                         expDataSigmaArr = expDataSigmaArr[:, j],
-                                                         simDataArr = simDataArr[:, i],
-                                                         impactParams = impactParams,
-                                                         expTime = expTimeArr[j],
-                                                         simTime = simTimeArr[i])
+        np.savez(filename,
+                 comparisonArr = comparisonArr,
+                 simTimeArr = simTimeArr,
+                 expTimeArr = expTimeArr)
             
     if makeplot:
 
@@ -940,6 +1031,15 @@ def compare_simulation_and_experiment(simulationName, shotnum, makeplot=False):
         # Plot the comparison
         fig = plt.figure(figsize=(12, 8), tight_layout=True)
         ax = fig.add_subplot(111)
+
+        # Only look at the data between tExpStart and tExpStop
+        if tExpStart != None and tExpStop != None:
+
+            startIdx = np.argmin(np.abs(expTimeArr - tExpStart))
+            stopIdx = np.argmin(np.abs(expTimeArr - tExpStop))
+
+            expTimeArr = expTimeArr[startIdx:stopIdx]
+            comparisonArr = comparisonArr[:, startIdx:stopIdx]
 
         X, Y = np.meshgrid(expTimeArr*1e3, simTimeArr*1e3)
 
@@ -965,7 +1065,7 @@ def compare_simulation_and_experiment(simulationName, shotnum, makeplot=False):
 
         plt.show()
 
-    return
+    return comparisonArr, simTimeArr, expTimeArr
 
 if __name__ == '__main__':
 
@@ -974,7 +1074,7 @@ if __name__ == '__main__':
         detDictList = pickle.load(pickleFile)
 
     # Simulation directory
-    simulationName = 'nneut_2e17_gb_2e17_NBI_800kW_ECH_0kW'
+    simulationName = 'nneut_1e18_gb_2e18_NBI_800kW_ECH_0kW'
     # Shot number
     shotnum = 260426037
 
@@ -988,7 +1088,7 @@ if __name__ == '__main__':
     # lineIntegratedDensArr = synthetic_see_detector(detDictList, interpFuncs[-1], True)
 
     # Generate the data for the time dependent synthetic detector
-    detDictList = time_dependent_see_detector(simulationName, detDictList, True)
+    # detDictList = time_dependent_see_detector(simulationName, detDictList, True)
 
     # Compare simulation to experiment
-    # compare_simulation_and_experiment(simulationName, shotnum, makeplot=True)
+    comparisonArr, simTimeArr, expTimeArr = compare_simulation_and_experiment(simulationName, shotnum, makeplot=True, tExpStart=2.5e-3, tExpStop=12.5e-3)
