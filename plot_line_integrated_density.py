@@ -162,7 +162,8 @@ if __name__ == "__main__":
 
     # Plot the data
     timesToPlot = np.array([1,3,5,7,9,11]) * 1e-3  # [s]
-    timesToPlot = np.arange(2, 8.1, 0.5) * 1e-3 # [s]
-    timesToPlot = np.arange(4.5, 5.6, 0.1) * 1e-3 # [s]
+    timesToPlot = np.array([2,3,4,5,6,7,8,9]) * 1e-3
+#    timesToPlot = np.arange(2, 8.1, 0.5) * 1e-3 # [s]
+#    timesToPlot = np.arange(4.5, 5.6, 0.1) * 1e-3 # [s]
     
     plot_data(timesToPlot)

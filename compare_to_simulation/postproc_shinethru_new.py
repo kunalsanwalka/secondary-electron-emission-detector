@@ -117,6 +117,9 @@ def average_data(timeArr, data, makeplot=False):
         Units = seconds
     data : np.array
         Corresponding data.
+    makeplot : bool
+        Plot the data.
+        Default is False.
     
     Returns
     -------
@@ -150,6 +153,36 @@ def average_data(timeArr, data, makeplot=False):
         plt.show()
 
     return newTimeArr, newData
+
+def offset_correct_data(timeArr, data, makeplot=False):
+    """
+    Offset correct the data. This is critical for the in-vessel SEE detectors since they see a big offset for some reason.
+
+    Parameters
+    ----------
+    timeArr : np.array
+        Time array for the data.
+        Units = seconds
+    data : np.array
+        Corresponding data.
+    makeplot : bool
+        Plot the data.
+        Default is False.
+
+    Returns
+    -------
+    offsetCorrectedData : np.array
+        Offset corrected data.
+    """
+
+    # Default to getting the data before t=-3ms
+    timeIdx = np.argmin(np.abs(timeArr - 3e-3))
+
+    preData = data[:timeIdx]
+
+    offsetCorrectedData = data - np.mean(preData)
+
+    return offsetCorrectedData
 
 def load_detector_dictionary(pickleFilePath, args, logger):
     """
@@ -355,6 +388,10 @@ def load_raw_data(detDictList, args, logger):
 
                 # Average down to 10kHz
                 newTimeArr, newDataArr = average_data(tempTime, rawSignal)
+
+                # Offset correct the data
+                newDataArr = offset_correct_data(newTimeArr, newDataArr)
+
                 detDict['raw_signal_slow'] = newDataArr
                 detDict['time_arr_slow'] = newTimeArr
 
@@ -379,6 +416,10 @@ def load_raw_data(detDictList, args, logger):
 
                 # Average down to 10kHz
                 newTimeArr, newDataArr = average_data(timeArr, rawSignal)
+
+                # Offset correct the data
+                newDataArr = offset_correct_data(newTimeArr, newDataArr)
+
                 detDict['raw_signal_slow'] = newDataArr
                 detDict['time_arr_slow'] = newTimeArr
 
@@ -431,6 +472,10 @@ def load_raw_data(detDictList, args, logger):
 
                     # Average down to 10kHz
                     newTimeArr, newDataArr = average_data(tempTime, rawSignal)
+
+                    # Offset correct the data
+                    newDataArr = offset_correct_data(newTimeArr, newDataArr)
+
                     detDict['ref_raw_signal_slow'] = newDataArr
 
                 # Beam dump detectors
@@ -453,6 +498,10 @@ def load_raw_data(detDictList, args, logger):
 
                     # Average down to 10kHz
                     newTimeArr, newDataArr = average_data(timeArr, rawSignal)
+                    
+                    # Offset correct the data
+                    newDataArr = offset_correct_data(newTimeArr, newDataArr)
+                    
                     detDict['ref_raw_signal_slow'] = newDataArr
 
             tree.close()

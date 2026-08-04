@@ -19,11 +19,6 @@ plt.switch_backend('TkAgg')
 # Make the font size larger
 plt.rcParams.update({'font.size': 18})
 
-global plotDest, dataDest
-plotDest = '/home/sanwalka/shinethru/plots/'
-dataDest = '/home/sanwalka/shinethru/data/'
-dataDest = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/nneut_1e15_gb_1e18_NBI_800kW_ECH_0kW/simulation_results/18.000/components/fp__cql3dm_4/'
-
 def species_labels(filename):
     """
     This function generates an array with the labels for each 'general' species
@@ -336,7 +331,7 @@ def generate_filename_list(simulationDir):
 
     return filenameList
 
-def generate_times_and_functions(simulationName):
+def generate_times_and_functions(simulationName, makeplot=False, saveplot=False):
     """
     Generate interpolation functions for the plasma density for every timestep of the simulation.
 
@@ -344,6 +339,12 @@ def generate_times_and_functions(simulationName):
     ----------
     simulationName : str
         Name of the simulation (same value passed to generate_times_and_functions).
+    makeplot : bool
+        Make a 2D animation of the density profile.
+        Default is False.
+    saveplot : bool
+        Save the animation as an .mp4 file.
+        The animation is stored in- '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/{simulationName}/plots'
 
     Returns
     -------
@@ -364,12 +365,9 @@ def generate_times_and_functions(simulationName):
         with open(simulationDir + 'density_interp_data.pkl', 'rb') as loadFile:
             saveData = pickle.load(loadFile)
 
-            interpFuncs = [
-                generate_single_interpolation(dens, saveData['solrz'], saveData['solzz'])
-                for dens in saveData['dens']
-            ]
+            interpFuncs = [generate_single_interpolation(dens, saveData['solrz'], saveData['solzz']) for dens in saveData['dens']]
 
-            return interpFuncs, saveData['times']
+            times = saveData['times']
     
     except:
 
@@ -420,7 +418,68 @@ def generate_times_and_functions(simulationName):
 
         print(f'Saved interpolation data to- \n {savePath}')
 
-        return interpFuncs, times
+    if makeplot:
+
+        # Load the saved data
+        with open(simulationDir + 'density_interp_data.pkl', 'rb') as loadFile:
+            saveData = pickle.load(loadFile)
+
+            solrz = saveData['solrz']
+            solzz = saveData['solzz']
+            times = saveData['times']
+
+            # [Time x r x z]
+            dens = saveData['dens']
+
+        dens = np.clip(dens, a_min=0, a_max=5e19)
+
+        import matplotlib.animation as animation
+
+        fig = plt.figure(figsize=(12, 8), tight_layout=True)
+        fig.suptitle(simulationName)
+        ax = fig.add_subplot(111)
+
+        # Fix the color levels across all timesteps so the colorbar is consistent
+        levels = np.linspace(np.min(dens), np.max(dens), 100)
+
+        pltObj = ax.contourf(solzz, solrz, dens[0], levels=levels, cmap='inferno')
+
+        cbar = fig.colorbar(pltObj)
+        cbar.set_label(r'Density [m$^{-3}$]')
+
+        ax.set_xlim(0, 0.8)
+        ax.set_aspect('equal')
+
+        ax.set_xlabel('Z [m]')
+        ax.set_ylabel('R [m]')
+        ax.set_title(f'Time = {times[0]*1e3:.4g} ms')
+
+        def update(frame):
+            ax.clear()
+
+            ax.contourf(solzz, solrz, dens[frame], levels=levels, cmap='inferno')
+            
+            ax.set_xlim(0, 0.8)
+            ax.set_aspect('equal')
+
+            ax.set_xlabel('Z [m]')
+            ax.set_ylabel('R [m]')
+            ax.set_title(f'Time = {times[frame]*1e3:.4g} ms')
+
+        anim = animation.FuncAnimation(fig, update, frames=dens.shape[0],
+                                        interval=50, blit=False)
+        
+        # Make a directory to store plots if it does not already exist
+        saveDir = simulationDir + 'plots'
+        os.makedirs(saveDir, exist_ok=True)
+
+        # Save the animation as an .mp4
+        if saveplot:
+            anim.save(saveDir+'/density_animation.mp4', writer='ffmpeg', fps=20, dpi=150)
+        
+        plt.show()
+
+    return interpFuncs, times
 
 def load_detector_dictionary(pickleFilePath):
 
@@ -829,27 +888,33 @@ def single_time_comparison(expDataArr, expDataSigmaArr, simDataArr, impactParams
     """
 
     # Normalize the data
-    expNorm = expDataArr.max()
-    expDataArr /= expNorm
-    expDataSigmaArr /= expNorm
+    # expNorm = expDataArr.max()
+    # expDataArr /= expNorm
+    # expDataSigmaArr /= expNorm
 
-    simNorm = simDataArr.max()
-    simDataArr /= simNorm
+    # simNorm = simDataArr.max()
+    # simDataArr /= simNorm
 
     # Difference between the simulation and experiment
     diff = expDataArr - simDataArr
 
-    # Root-squared of the difference
-    rsDiff = (diff**2)**0.5
+    absDiff = np.mean(np.abs(diff))
 
-    # Weight it by the error bars
-    weights = 1/expDataSigmaArr
+    avgDens = np.mean(np.concatenate((expDataArr, simDataArr)))
 
-    comparison = np.sum(rsDiff * weights)
+    return absDiff/avgDens
 
-    return comparison
+    # # Root-squared of the difference
+    # rsDiff = (diff**2)**0.5
 
-def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=False, makeplot=False, tExpStart=None, tExpStop=None):
+    # # Weight it by the error bars
+    # weights = 1/expDataSigmaArr
+
+    # comparison = np.sum(rsDiff * weights)
+
+    # return comparison
+
+def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=False, makeplot=False, saveplot=False, tExpStart=None, tExpStop=None):
     """
     Compare the plasma density profiles between the CQL3D + KN1D simulation and the experimental result
 
@@ -864,6 +929,9 @@ def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=Fals
         Default is False.
     makeplot : bool
         Plot the comparison.
+        Default is False
+    saveplot : bool
+        Save the plot.
         Default is False
     tExpStart : float
         Start time of the experimental data for plotting. [s]
@@ -1029,7 +1097,7 @@ def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=Fals
         import matplotlib.ticker as ticker
 
         # Plot the comparison
-        fig = plt.figure(figsize=(12, 8), tight_layout=True)
+        fig = plt.figure(figsize=(12, 5), tight_layout=True)
         ax = fig.add_subplot(111)
 
         # Only look at the data between tExpStart and tExpStop
@@ -1056,16 +1124,43 @@ def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=Fals
         ax.set_xlabel('Experimental Time [ms]')
         ax.set_ylabel('Simulation Time [ms]')
 
+        ax.set_aspect('equal')
+
         ax.set_title(f'{shotnum} vs {simulationName}')
 
         cbar = fig.colorbar(pltObj)
         cbar.locator = ticker.LogLocator(base=10.0, numticks=10)
         cbar.update_ticks()
-        cbar.set_label("Comparison", rotation=90, labelpad=15)
+        cbar.set_label("Comparison", rotation=90)
 
-        plt.show()
+        if saveplot:
+
+            # Make a directory to store plots if it does not already exist
+            saveDir = simulationDir + 'plots'
+            os.makedirs(saveDir, exist_ok=True)
+
+            plt.savefig(saveDir+f'/{shotnum}_vs_{simulationName}.png', dpi=300)
+
+        # plt.show()
 
     return comparisonArr, simTimeArr, expTimeArr
+
+def compare_all_simulations(shotnum):
+
+    # Get the names of all the simulations
+    simulationDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/'
+
+    # Find all the simulation names
+    simNameList = [d for d in os.listdir(simulationDir) if os.path.isdir(os.path.join(simulationDir, d))]
+
+    # Go over all the simulations and compare vs. experiment
+    for i in range(len(simNameList)):
+
+        print(f'Comparing vs. {simNameList[i]}')
+
+        _, _, _ = compare_simulation_and_experiment(simNameList[i], shotnum, makeplot=True, saveplot=True)
+
+    return
 
 if __name__ == '__main__':
 
@@ -1082,7 +1177,7 @@ if __name__ == '__main__':
     # detDictList = load_experimental_data(shotnum, True)
 
     # Load all the interpolation functions
-    # interpFuncs, times = generate_times_and_functions(simulationName)
+    # interpFuncs, times = generate_times_and_functions(simulationName, makeplot=True, saveplot=True)
 
     # Check the synthetic diagnostic at a given timepoint
     # lineIntegratedDensArr = synthetic_see_detector(detDictList, interpFuncs[-1], True)
@@ -1091,4 +1186,7 @@ if __name__ == '__main__':
     # detDictList = time_dependent_see_detector(simulationName, detDictList, True)
 
     # Compare simulation to experiment
-    comparisonArr, simTimeArr, expTimeArr = compare_simulation_and_experiment(simulationName, shotnum, makeplot=True, tExpStart=2.5e-3, tExpStop=12.5e-3)
+    # comparisonArr, simTimeArr, expTimeArr = compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=True, makeplot=True, saveplot=True)
+
+    # Compare the experiment to all simulations
+    compare_all_simulations(shotnum)

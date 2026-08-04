@@ -6,6 +6,9 @@ import matplotlib
 import scipy as sc
 matplotlib.use('TkAgg')
 
+# Make the font size larger
+plt.rcParams.update({'font.size': 18})
+
 def parseArgs():
 
     parser = argparse.ArgumentParser()

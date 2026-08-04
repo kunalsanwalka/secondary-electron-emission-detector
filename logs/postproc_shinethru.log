@@ -1,14 +1,88 @@
-2026-07-21 16:43:00,275, postproc_shinethru - INFO: Logger file created
-2026-07-21 16:43:00,275, postproc_shinethru - INFO: parseArgs
-2026-07-21 16:43:00,275, postproc_shinethru - INFO: try statement
-2026-07-21 16:43:00,276, postproc_shinethru - INFO: parser.parse_args succeeded?
-2026-07-21 16:43:00,276, postproc_shinethru - INFO: {'shotnum': 260426037, 'ref_shotnum': 0, 'debug': False, 'plot': True, 'decimation': 10000.0}
-2026-07-21 16:43:00,276, postproc_shinethru - INFO: Arguments parsed.
-2026-07-21 16:43:00,276, postproc_shinethru - INFO: No reference shot number specified, pulling from MDSplus.
-2026-07-21 16:43:00,576, postproc_shinethru - INFO: Pulled reference shot number 260426029 from MDSplus.
-2026-07-21 16:43:00,577, postproc_shinethru - INFO: Arguments parsed, now running post processing script.
-2026-07-21 16:43:00,667, postproc_shinethru - INFO: Loading detector dictionary from /home/sanwalka/shinethru/lookup_tables/see_detector_dictionary.pkl
-2026-07-21 16:43:00,668, postproc_shinethru - INFO: Adding raw node names to the detector dictionary list.
-2026-07-21 16:43:00,668, postproc_shinethru - INFO: Adding processed node names to the detector dictionary list.
-2026-07-21 16:43:00,669, postproc_shinethru - INFO: Adding resistance values to the detector dictionary list.
-2026-07-21 16:43:00,669, postproc_shinethru - INFO: Loading raw data for the plasma/current shot.
+2026-07-23 19:39:55,325, postproc_shinethru - INFO: Logger file created
+2026-07-23 19:39:55,325, postproc_shinethru - INFO: parseArgs
+2026-07-23 19:39:55,326, postproc_shinethru - INFO: try statement
+2026-07-23 19:39:55,326, postproc_shinethru - INFO: parser.parse_args succeeded?
+2026-07-23 19:39:55,326, postproc_shinethru - INFO: {'shotnum': 260723018, 'ref_shotnum': 0, 'debug': True, 'plot': False, 'decimation': 10000.0}
+2026-07-23 19:39:55,326, postproc_shinethru - INFO: Arguments parsed.
+2026-07-23 19:39:55,326, postproc_shinethru - INFO: No reference shot number specified, pulling from MDSplus.
+2026-07-23 19:39:55,664, postproc_shinethru - INFO: Pulled reference shot number 260723015 from MDSplus.
+2026-07-23 19:39:55,664, postproc_shinethru - INFO: Arguments parsed, now running post processing script.
+2026-07-23 19:39:55,720, postproc_shinethru - INFO: Loading detector dictionary from /home/sanwalka/shinethru/lookup_tables/see_detector_dictionary.pkl
+2026-07-23 19:39:55,721, postproc_shinethru - INFO: Printing all detector information.
+2026-07-23 19:39:55,722, postproc_shinethru - INFO: Adding raw node names to the detector dictionary list.
+2026-07-23 19:39:55,722, postproc_shinethru - INFO: Adding processed node names to the detector dictionary list.
+2026-07-23 19:39:55,722, postproc_shinethru - INFO: Adding resistance values to the detector dictionary list.
+2026-07-23 19:39:55,722, postproc_shinethru - INFO: Loading raw data for the plasma/current shot.
+2026-07-23 19:39:56,124, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_01
+2026-07-23 19:39:56,889, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_02
+2026-07-23 19:39:56,904, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_03
+2026-07-23 19:39:56,922, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_04
+2026-07-23 19:39:56,981, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_05
+2026-07-23 19:39:56,999, postproc_shinethru - INFO: No raw node specified for this detector, skipping loading raw data for this detector.
+2026-07-23 19:39:57,000, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_07
+2026-07-23 19:39:57,021, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_08
+2026-07-23 19:39:57,034, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_09
+2026-07-23 19:39:57,051, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_10
+2026-07-23 19:39:57,065, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_11
+2026-07-23 19:39:57,085, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_12
+2026-07-23 19:39:57,101, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_13
+2026-07-23 19:39:57,122, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_14
+2026-07-23 19:39:57,137, postproc_shinethru - INFO: Loading raw data for raw.acq1001_634.ch_09
+2026-07-23 19:39:57,424, postproc_shinethru - INFO: Loading raw data for raw.acq1001_633.ch_06
+2026-07-23 19:39:57,971, postproc_shinethru - INFO: Loading raw data for raw.acq1001_633.ch_05
+2026-07-23 19:39:58,248, postproc_shinethru - INFO: Loading raw data for raw.acq1001_633.ch_04
+2026-07-23 19:39:58,534, postproc_shinethru - INFO: Loading raw data for raw.acq1001_633.ch_01
+2026-07-23 19:39:58,834, postproc_shinethru - INFO: Loading raw data for raw.acq1001_633.ch_02
+2026-07-23 19:39:59,086, postproc_shinethru - INFO: Loading raw data for raw.acq1001_633.ch_03
+2026-07-23 19:39:59,357, postproc_shinethru - INFO: Loading raw data for the reference shot.
+2026-07-23 19:40:03,078, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_01
+2026-07-23 19:40:04,064, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_02
+2026-07-23 19:40:04,080, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_03
+2026-07-23 19:40:04,102, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_04
+2026-07-23 19:40:04,118, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_05
+2026-07-23 19:40:04,139, postproc_shinethru - INFO: No raw node specified for this detector, skipping loading raw data for this detector.
+2026-07-23 19:40:04,139, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_07
+2026-07-23 19:40:04,165, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_08
+2026-07-23 19:40:04,182, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_09
+2026-07-23 19:40:04,204, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_10
+2026-07-23 19:40:04,220, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_11
+2026-07-23 19:40:04,241, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_12
+2026-07-23 19:40:04,256, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_13
+2026-07-23 19:40:04,275, postproc_shinethru - INFO: Loading raw data for raw.acq1001_635.ch_14
+2026-07-23 19:40:04,291, postproc_shinethru - INFO: Loading raw data for raw.acq1001_634.ch_09
+2026-07-23 19:40:04,960, postproc_shinethru - INFO: Loading raw data for raw.acq1001_633.ch_06
+2026-07-23 19:40:05,948, postproc_shinethru - INFO: Loading raw data for raw.acq1001_633.ch_05
+2026-07-23 19:40:06,866, postproc_shinethru - INFO: Loading raw data for raw.acq1001_633.ch_04
+2026-07-23 19:40:08,727, postproc_shinethru - INFO: Loading raw data for raw.acq1001_633.ch_01
+2026-07-23 19:40:09,692, postproc_shinethru - INFO: Loading raw data for raw.acq1001_633.ch_02
+2026-07-23 19:40:10,240, postproc_shinethru - INFO: Loading raw data for raw.acq1001_633.ch_03
+2026-07-23 19:40:10,632, postproc_shinethru - INFO: Making plots of the raw signals for debugging.
+2026-07-23 19:41:11,449, postproc_shinethru - INFO: Calculating line integrated densities.
+2026-07-23 19:41:11,449, postproc_shinethru - INFO: Loading the NBI voltages for the plasma shot.
+2026-07-23 19:41:12,029, postproc_shinethru - INFO: Gas type for this shot is Deuterium.
+2026-07-23 19:41:12,033, postproc_shinethru - INFO: The shape of the shine-thru table is: (1200, 32)
+2026-07-23 19:41:12,033, postproc_shinethru - INFO: The shape of the line density scan array is: (1200,)
+2026-07-23 19:41:12,033, postproc_shinethru - INFO: The shape of the NBI voltage scan array is: (32,)
+2026-07-23 19:41:12,033, postproc_shinethru - INFO: Calculating SEE density for detector 1.
+2026-07-23 19:41:12,750, postproc_shinethru - INFO: Calculating SEE density for detector 2.
+2026-07-23 19:41:13,099, postproc_shinethru - INFO: Calculating SEE density for detector 3.
+2026-07-23 19:41:13,465, postproc_shinethru - INFO: Calculating SEE density for detector 4.
+2026-07-23 19:41:13,901, postproc_shinethru - INFO: Calculating SEE density for detector 5.
+2026-07-23 19:41:14,459, postproc_shinethru - INFO: Calculating SEE density for detector 6.
+2026-07-23 19:41:14,459, postproc_shinethru - INFO: Calculating SEE density for detector 7.
+2026-07-23 19:41:15,118, postproc_shinethru - INFO: Calculating SEE density for detector 8.
+2026-07-23 19:41:15,508, postproc_shinethru - INFO: Calculating SEE density for detector 9.
+2026-07-23 19:41:15,882, postproc_shinethru - INFO: Calculating SEE density for detector 10.
+2026-07-23 19:41:16,587, postproc_shinethru - INFO: Calculating SEE density for detector 11.
+2026-07-23 19:41:17,567, postproc_shinethru - INFO: Calculating SEE density for detector 12.
+2026-07-23 19:41:17,983, postproc_shinethru - INFO: Calculating SEE density for detector 13.
+2026-07-23 19:41:18,613, postproc_shinethru - INFO: Calculating SEE density for detector 14.
+2026-07-23 19:41:19,017, postproc_shinethru - INFO: Calculating SEE density for detector 15.
+2026-07-23 19:41:19,438, postproc_shinethru - INFO: Calculating SEE density for detector 16.
+2026-07-23 19:41:19,836, postproc_shinethru - INFO: Calculating SEE density for detector 17.
+2026-07-23 19:41:20,258, postproc_shinethru - INFO: Calculating SEE density for detector 18.
+2026-07-23 19:41:20,672, postproc_shinethru - INFO: Calculating SEE density for detector 19.
+2026-07-23 19:41:21,091, postproc_shinethru - INFO: Calculating SEE density for detector 20.
+2026-07-23 19:41:21,534, postproc_shinethru - INFO: Calculating SEE density for detector 21.
+2026-07-23 19:41:21,914, postproc_shinethru - INFO: Making plots of the line integrated densities for debugging.
+2026-07-23 19:42:10,218, postproc_shinethru - INFO: Post processing completed.
