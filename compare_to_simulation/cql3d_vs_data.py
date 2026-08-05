@@ -81,6 +81,28 @@ def species_labels(filename):
     return speciesLabels
 
 def ion_dens(filename, makeplot=False):
+    """
+    This function loads the (r,z) ion density profile from a given cql3d+kn1d .nc file.
+
+    Parameters
+    ----------
+    filename : str
+        Location of the CQL3D output file.
+    makeplot : bool, optional
+        Whether to plot the density profile. 
+        The default is False.
+
+    Returns
+    -------
+    dens : np.array
+        3D array of the ion density profile [Time x R x Z] [m^-3]
+    solrz : np.array
+        2D array of the r values [m]
+    solzz : np.array
+        2D array of the z values [m]
+    time : np.array
+        1D array of the time values [s]
+    """
 
     # Open the file
     ds = xr.open_dataset(filename,
@@ -1032,7 +1054,6 @@ def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=Fals
         # Convert to numpy as rename
         expTimeArr = np.array(expTimeArrNew)
         expDataArr = np.array(expDataArrNew)
-        expDataArr = np.array(expDataArrNew)
         expDataSigmaArr = np.array(expDataSigmaArrNew)
 
         #### Put the simulation data into a 2D numpy array
@@ -1072,11 +1093,11 @@ def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=Fals
             for j in range(len(expTimeArr)):
 
                 comparisonArr[i, j] = single_time_comparison(expDataArr = expDataArr[:, j],
-                                                            expDataSigmaArr = expDataSigmaArr[:, j],
-                                                            simDataArr = simDataArr[:, i],
-                                                            impactParams = impactParams,
-                                                            expTime = expTimeArr[j],
-                                                            simTime = simTimeArr[i])
+                                                             expDataSigmaArr = expDataSigmaArr[:, j],
+                                                             simDataArr = simDataArr[:, i],
+                                                             impactParams = impactParams,
+                                                             expTime = expTimeArr[j],
+                                                             simTime = simTimeArr[i])
                 
         #### Save the data
 
@@ -1141,7 +1162,7 @@ def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=Fals
 
             plt.savefig(saveDir+f'/{shotnum}_vs_{simulationName}.png', dpi=300)
 
-        # plt.show()
+        plt.show()
 
     return comparisonArr, simTimeArr, expTimeArr
 
@@ -1186,7 +1207,7 @@ if __name__ == '__main__':
     # detDictList = time_dependent_see_detector(simulationName, detDictList, True)
 
     # Compare simulation to experiment
-    # comparisonArr, simTimeArr, expTimeArr = compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=True, makeplot=True, saveplot=True)
+    comparisonArr, simTimeArr, expTimeArr = compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=False, makeplot=True, saveplot=False)
 
     # Compare the experiment to all simulations
-    compare_all_simulations(shotnum)
+    # compare_all_simulations(shotnum)
