@@ -19,6 +19,10 @@ plt.switch_backend('TkAgg')
 # Make the font size larger
 plt.rcParams.update({'font.size': 18})
 
+# Global variable to store the simulation scan directory
+global simulationScanDir
+simulationScanDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/withRadialDiff/'
+
 def species_labels(filename):
     """
     This function generates an array with the labels for each 'general' species
@@ -353,6 +357,27 @@ def generate_filename_list(simulationDir):
 
     return filenameList
 
+def find_simulation_names():
+    """
+    Find the names of all the simulations in simulationScanDir.
+
+    Only directories containing a 'simulation_results' sub-directory are
+    counted as simulations. This skips other directories in the scan directory
+    (such as 'plots', which is created by plot_simulation_scan_panel).
+
+    Returns
+    -------
+    simNameList : list of str
+        Names of all the simulations.
+    """
+
+    simNameList = [
+        d for d in sorted(os.listdir(simulationScanDir))
+        if os.path.isdir(os.path.join(simulationScanDir, d, 'simulation_results'))
+    ]
+
+    return simNameList
+
 def generate_times_and_functions(simulationName, makeplot=False, saveplot=False):
     """
     Generate interpolation functions for the plasma density for every timestep of the simulation.
@@ -366,7 +391,7 @@ def generate_times_and_functions(simulationName, makeplot=False, saveplot=False)
         Default is False.
     saveplot : bool
         Save the animation as an .mp4 file.
-        The animation is stored in- '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/{simulationName}/plots'
+        The animation is stored in- simulationScanDir + f'/{simulationName}/plots'
 
     Returns
     -------
@@ -377,7 +402,7 @@ def generate_times_and_functions(simulationName, makeplot=False, saveplot=False)
     """
 
     # All simulations are stored in the same directory
-    simulationDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/' + simulationName + '/'
+    simulationDir = simulationScanDir + simulationName + '/'
 
     # Try to load the data if it has already been stored
     try:
@@ -615,7 +640,7 @@ def time_dependent_see_detector(simulationName, detDictList, makeplot=False, tim
     """
 
     # All simulations are stored in the same directory
-    simulationDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/' + simulationName + '/'
+    simulationDir = simulationScanDir + simulationName + '/'
 
     # Load the saved data if it already exists
     try:
@@ -974,7 +999,7 @@ def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=Fals
     """
 
     # All simulations are stored in the same directory
-    simulationDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/' + simulationName + '/'
+    simulationDir = simulationScanDir + simulationName + '/'
 
     try:
 
@@ -1166,20 +1191,305 @@ def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=Fals
 
     return comparisonArr, simTimeArr, expTimeArr
 
-def compare_all_simulations(shotnum):
+def parse_simulation_name(simulationName):
+    """
+    Extract the main vessel and gas box neutral densities from a simulation name.
 
-    # Get the names of all the simulations
-    simulationDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/'
+    The simulation names follow the format
+    nneut_XXX_gb_YYY_NBI_800kW_ECH_0kW_ionDrrOn
+    where XXX is the main vessel neutral density and YYY is the gas box neutral
+    density.
+
+    Parameters
+    ----------
+    simulationName : str
+        Name of the simulation.
+
+    Returns
+    -------
+    mainVesselDens : float
+        Main vessel neutral density. [m^-3]
+        None if the name could not be parsed.
+    gasBoxDens : float
+        Gas box neutral density. [m^-3]
+        None if the name could not be parsed.
+    """
+
+    import re
+
+    match = re.search(r'nneut_([0-9.]+e[+-]?[0-9]+)_gb_([0-9.]+e[+-]?[0-9]+)', simulationName)
+
+    if match is None:
+        return None, None
+
+    mainVesselDens = float(match.group(1))
+    gasBoxDens = float(match.group(2))
+
+    return mainVesselDens, gasBoxDens
+
+def density_label(dens):
+    """
+    Make a nice LaTeX label out of a neutral density value.
+
+    Parameters
+    ----------
+    dens : float
+        Neutral density. [m^-3]
+
+    Returns
+    -------
+    label : str
+        Label of the density.
+    """
+
+    exponent = int(np.floor(np.log10(dens)))
+    mantissa = dens / 10**exponent
+
+    # Drop the trailing '.0' for integer mantissas
+    if np.isclose(mantissa, round(mantissa)):
+        mantissaStr = f'{int(round(mantissa))}'
+    else:
+        mantissaStr = f'{mantissa:.1f}'
+
+    label = rf'${mantissaStr}\times10^{{{exponent}}}\,\mathrm{{m^{{-3}}}}$'
+
+    return label
+
+def plot_simulation_scan_panel(shotnum, simNameList=None, tExpStart=None, tExpStop=None, vmin=None, vmax=None, saveplot=False):
+    """
+    Make a panel plot of the comparison between the experiment and every
+    simulation in the scan.
+
+    The columns are the gas box neutral density and the rows are the main
+    vessel neutral density (both increasing). All the sub-plots share the same
+    colorbar so that they can be compared directly.
+
+    This function only reads the pre-computed comparison data stored in
+    simulationScanDir + '{simulationName}/shot_comparison/{shotnum}.npz'.
+
+    Parameters
+    ----------
+    shotnum : int
+        Shot number the simulations were compared against.
+    simNameList : list of str
+        Simulations to include in the plot.
+        Default is None, in which case every directory in simulationScanDir is used.
+    tExpStart : float
+        Start time of the experimental data for plotting. [s]
+        Default is None.
+    tExpStop : float
+        Stop time of the experimental data for plotting. [s]
+        Default is None.
+    vmin : float
+        Lower limit of the shared colorbar.
+        Default is None, in which case it is taken from the data.
+    vmax : float
+        Upper limit of the shared colorbar.
+        Default is None, in which case it is taken from the data.
+    saveplot : bool
+        Save the plot in simulationScanDir + 'plots/'.
+        Default is False.
+
+    Returns
+    -------
+    None
+    """
+
+    import matplotlib.ticker as ticker
+    from matplotlib.colors import LogNorm
 
     # Find all the simulation names
-    simNameList = [d for d in os.listdir(simulationDir) if os.path.isdir(os.path.join(simulationDir, d))]
+    if simNameList is None:
+        simNameList = find_simulation_names()
+
+    # =========================================================================
+    # Load all the pre-computed comparison data
+    # =========================================================================
+
+    # Dictionary of the comparison data keyed by (mainVesselDens, gasBoxDens)
+    dataDict = {}
+
+    for simulationName in simNameList:
+
+        mainVesselDens, gasBoxDens = parse_simulation_name(simulationName)
+
+        if mainVesselDens is None:
+            print(f'Could not parse the neutral densities from {simulationName}. Skipping it.')
+            continue
+
+        filename = simulationScanDir + simulationName + f'/shot_comparison/{shotnum}.npz'
+
+        if not os.path.isfile(filename):
+            print(f'No comparison data for {simulationName}. Skipping it.')
+            continue
+
+        dataObj = np.load(filename)
+
+        comparisonArr = dataObj['comparisonArr']
+        simTimeArr = dataObj['simTimeArr']
+        expTimeArr = dataObj['expTimeArr']
+
+        # Only look at the data between tExpStart and tExpStop
+        if tExpStart != None and tExpStop != None:
+
+            startIdx = np.argmin(np.abs(expTimeArr - tExpStart))
+            stopIdx = np.argmin(np.abs(expTimeArr - tExpStop))
+
+            expTimeArr = expTimeArr[startIdx:stopIdx]
+            comparisonArr = comparisonArr[:, startIdx:stopIdx]
+
+        dataDict[(mainVesselDens, gasBoxDens)] = (comparisonArr, simTimeArr, expTimeArr, simulationName)
+
+    if len(dataDict) == 0:
+        print(f'No pre-computed comparison data found for shot {shotnum}.')
+        return
+
+    # =========================================================================
+    # Set up the grid of the panel plot
+    # =========================================================================
+
+    # Unique densities, in increasing order
+    mainVesselDensArr = np.array(sorted(set([key[0] for key in dataDict.keys()])))
+    gasBoxDensArr = np.array(sorted(set([key[1] for key in dataDict.keys()])))
+
+    nRows = len(mainVesselDensArr)
+    nCols = len(gasBoxDensArr)
+
+    # =========================================================================
+    # Shared color scale across every sub-plot
+    # =========================================================================
+
+    if vmin is None:
+        # Smallest positive value across all the simulations
+        vmin = np.min([arr[arr > 0].min() for arr, _, _, _ in dataDict.values() if np.any(arr > 0)])
+        vmin = max(1e-5, vmin)
+    if vmax is None:
+        vmax = np.max([arr.max() for arr, _, _, _ in dataDict.values()])
+
+    # Common set of log-spaced levels so every panel uses the same colors
+    logLevels = np.logspace(np.log10(vmin), np.log10(vmax), 100)
+    norm = LogNorm(vmin=vmin, vmax=vmax)
+
+    # =========================================================================
+    # Make the plot
+    # =========================================================================
+
+    # Smaller fonts since there are a lot of sub-plots
+    with plt.rc_context({'font.size': 10}):
+
+        fig, axs = plt.subplots(nRows, nCols,
+                                figsize = (4*nCols, 3.2*nRows),
+                                squeeze = False,
+                                sharex = True)
+
+        pltObj = None
+
+        for i in range(nRows):
+            for j in range(nCols):
+
+                ax = axs[i, j]
+
+                key = (mainVesselDensArr[i], gasBoxDensArr[j])
+
+                if key not in dataDict:
+                    # No data for this combination of densities
+                    ax.set_axis_off()
+                    continue
+
+                comparisonArr, simTimeArr, expTimeArr, simulationName = dataDict[key]
+
+                X, Y = np.meshgrid(expTimeArr*1e3, simTimeArr*1e3)
+
+                pltObj = ax.contourf(X, Y, np.clip(comparisonArr, vmin, vmax),
+                                     levels = logLevels,
+                                     norm = norm,
+                                     cmap = 'viridis')
+
+                ax.set_title(simulationName, fontsize=8)
+
+                # Only label the outer axes
+                if i == nRows-1:
+                    ax.set_xlabel('Experimental Time [ms]')
+                if j == 0:
+                    ax.set_ylabel('Simulation Time [ms]')
+
+        # Label the rows and columns with the neutral densities
+        for j in range(nCols):
+            axs[0, j].annotate(density_label(gasBoxDensArr[j]),
+                               xy = (0.5, 1.0), xycoords = 'axes fraction',
+                               xytext = (0, 30), textcoords = 'offset points',
+                               ha = 'center', va = 'bottom', fontsize = 16)
+        for i in range(nRows):
+            axs[i, 0].annotate(density_label(mainVesselDensArr[i]),
+                               xy = (0.0, 0.5), xycoords = 'axes fraction',
+                               xytext = (-60, 0), textcoords = 'offset points',
+                               ha = 'right', va = 'center', fontsize = 16,
+                               rotation = 90)
+
+        fig.suptitle(f'Shot {shotnum}: 2D scan in main vessel (rows) and gas box (columns) neutral density',
+                     fontsize = 18)
+
+        fig.tight_layout(rect=[0.04, 0, 0.92, 0.97])
+
+        # Single shared colorbar for all the sub-plots
+        if pltObj is not None:
+
+            cbarAx = fig.add_axes([0.94, 0.1, 0.015, 0.8])
+
+            cbar = fig.colorbar(pltObj, cax=cbarAx)
+            cbar.locator = ticker.LogLocator(base=10.0, numticks=10)
+            cbar.update_ticks()
+            cbar.set_label('Comparison', rotation=90)
+
+        if saveplot:
+
+            # Make a directory to store plots if it does not already exist
+            saveDir = simulationScanDir + 'plots'
+            os.makedirs(saveDir, exist_ok=True)
+
+            print(f'Saving the panel plot to {saveDir}/{shotnum}_scan_panel.png')
+            plt.savefig(saveDir + f'/{shotnum}_scan_panel.png', dpi=300)
+
+        plt.show()
+
+    return
+
+def compare_all_simulations(shotnum, makeIndividualPlots=True, makePanelPlot=True):
+    """
+    Compare a given shot against every simulation in the scan directory.
+
+    Parameters
+    ----------
+    shotnum : int
+        Shot number we want to compare against.
+    makeIndividualPlots : bool
+        Make (and save) the individual comparison plot for each simulation.
+        Default is True.
+    makePanelPlot : bool
+        Make the panel plot of the whole scan once all the data is computed.
+        Default is True.
+
+    Returns
+    -------
+    None
+    """
+
+    # Find all the simulation names
+    simNameList = find_simulation_names()
 
     # Go over all the simulations and compare vs. experiment
     for i in range(len(simNameList)):
 
         print(f'Comparing vs. {simNameList[i]}')
 
-        _, _, _ = compare_simulation_and_experiment(simNameList[i], shotnum, makeplot=True, saveplot=True)
+        _, _, _ = compare_simulation_and_experiment(simNameList[i], shotnum,
+                                                    makeplot = makeIndividualPlots,
+                                                    saveplot = makeIndividualPlots)
+
+    # Now that all the data is pre-computed, make the panel plot of the scan
+    if makePanelPlot:
+
+        plot_simulation_scan_panel(shotnum, simNameList=simNameList, saveplot=True)
 
     return
 
@@ -1190,7 +1500,7 @@ if __name__ == '__main__':
         detDictList = pickle.load(pickleFile)
 
     # Simulation directory
-    simulationName = 'nneut_1e18_gb_2e18_NBI_800kW_ECH_0kW'
+    simulationName = 'nneut_1e18_gb_1e18_NBI_800kW_ECH_0kW'
     # Shot number
     shotnum = 260426037
 
@@ -1207,7 +1517,7 @@ if __name__ == '__main__':
     # detDictList = time_dependent_see_detector(simulationName, detDictList, True)
 
     # Compare simulation to experiment
-    comparisonArr, simTimeArr, expTimeArr = compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=False, makeplot=True, saveplot=False)
+    # comparisonArr, simTimeArr, expTimeArr = compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=False, makeplot=True, saveplot=True)
 
     # Compare the experiment to all simulations
-    # compare_all_simulations(shotnum)
+    compare_all_simulations(shotnum, makeIndividualPlots=False, makePanelPlot=True)

@@ -9,6 +9,10 @@ import pickle
 
 from cql3d_vs_data import load_detector_dictionary, time_dependent_see_detector, load_experimental_data
 
+# Global variable to store the simulation scan directory
+global simulationScanDir
+simulationScanDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/withRadialDiff/'
+
 def exp_dict_to_numpy(detDictList):
 
     # Detector impact parameters [m]
@@ -88,7 +92,7 @@ def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPl
     """
 
     # All simulations are stored in the same directory
-    simulationDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/' + simulationName + '/'
+    simulationDir = simulationScanDir + simulationName + '/'
 
     # Load the saved data
     with open(simulationDir + 'density_interp_data.pkl', 'rb') as loadFile:
@@ -180,6 +184,20 @@ def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPl
                  linewidth=3, 
                  linestyle='dashed')
 
+        ax2.errorbar(impactParams, expDataArr[:, timeIdx], 
+                     yerr=expDataSigmaArr[:, timeIdx],
+                     color=f'C{i}',
+                     fmt='o',
+                     ms=10,
+                     elinewidth=7)
+        
+        ax2.errorbar(impactParams, expDataArr[:, timeIdx], 
+                     yerr=3*expDataSigmaArr[:, timeIdx],
+                     color=f'C{i}',
+                     fmt='o',
+                     ms=10,
+                     elinewidth=3)
+
     ax1.set_ylabel(r'n$_i$ [m$^{-3}$]')
     ax1.set_ylim(0, None)
 
@@ -199,14 +217,57 @@ def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPl
 
     return
 
+def synthetic_interferometer(simulationName, makeplot=False):
+
+    # All simulations are stored in the same directory
+    simulationDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/' + simulationName + '/'
+
+    with open(simulationDir + 'density_interp_data.pkl', 'rb') as loadFile:
+
+        saveData = pickle.load(loadFile)
+
+        # [Time x radius x axial]
+        dens = saveData['dens']
+
+        solrz = saveData['solrz']
+        solzz = saveData['solzz']
+        times = saveData['times']
+
+    # Radial profile at the midplane
+    densRad = dens[:, :, 0]
+    # Radial points at the midplane
+    r1D = solrz[:, 0]
+
+    # Average over the radial points to get the 'synthetic interferometer'
+    synInf = np.trapezoid(densRad, x=r1D, axis=1)
+
+    if makeplot:
+
+        fig = plt.figure(figsize=(12, 8), tight_layout=True)
+        ax = fig.add_subplot(1, 1, 1)
+
+        ax.plot(times*1e3, synInf, linewidth=3)
+
+        ax.set_title(simulationName)
+        ax.set_xlabel('Time [ms]')
+        ax.set_ylabel(r'$\int n_p \cdot dl$ [m$^{-3}$]')
+
+        ax.set_xlim(0, None)
+        ax.set_ylim(0, None)
+
+        plt.show()
+
+    return times, synInf
+
 if __name__ == "__main__":
 
-    simName = 'nneut_1e18_gb_2e18_NBI_800kW_ECH_0kW'
+    simName = 'nneut_5e18_gb_5e18_NBI_800kW_ECH_0kW_ionDrrOn'
 
     # Times to plot (in seconds)
-    timesToPlotSim = np.array([0.16, 0.47]) * 1e-3
-    timesToPlotExp = np.array([4, 6.7]) * 1e-3
+    timesToPlotSim = np.array([3.5]) * 1e-3
+    timesToPlotExp = np.array([7.6]) * 1e-3
 
     shotnum = 260426037
 
     plot_radial_and_synthetic(simName, shotnum, timesToPlotSim, timesToPlotExp)
+    # times, synInf = synthetic_interferometer(simName, makeplot=True)

@@ -40,7 +40,7 @@ def parseArgs():
     
     return args
 
-def plot_data(timesToPlot):
+def load_data():
 
     ###########################################################################
     # Load the densities from each detector
@@ -82,7 +82,7 @@ def plot_data(timesToPlot):
     tree.close()
 
     ###########################################################################
-    # Put all the data on the same time axis by interpolating the data to a 
+    # Put all the data on the same time axis by interpolating the data to a
     # common time array
     ###########################################################################
 
@@ -112,6 +112,12 @@ def plot_data(timesToPlot):
     impactParams = np.delete(impactParams, [5, 15])
     densityArr_interp = np.delete(densityArr_interp, [5, 15], axis=0)
     densityErrArr_interp = np.delete(densityErrArr_interp, [5, 15], axis=0)
+
+    return timeArr, impactParams, densityArr_interp, densityErrArr_interp
+
+def plot_data(timesToPlot):
+
+    timeArr, impactParams, densityArr_interp, densityErrArr_interp = load_data()
 
     ###########################################################################
     # Plot the data
@@ -154,6 +160,27 @@ def plot_data(timesToPlot):
 
     return
 
+def print_data(timesToPrint):
+
+    timeArr, impactParams, densityArr_interp, densityErrArr_interp = load_data()
+
+    # Sort the data based on impactParams
+    sortIdx = np.argsort(impactParams)
+    impactParams_sorted = impactParams[sortIdx]
+
+    for t in timesToPrint:
+
+        timeIdx = np.argmin(np.abs(timeArr - t))
+        densAtTime_sorted = densityArr_interp[sortIdx, timeIdx]
+        densErrAtTime_sorted = densityErrArr_interp[sortIdx, timeIdx]
+
+        print(f'\nTime = {timeArr[timeIdx]*1e3:.3f} ms')
+        print(f'{"Impact Parameter [m]":>22} {"Density [m^-2]":>18} {"Error [m^-2]":>18}')
+        for impact, dens, err in zip(impactParams_sorted, densAtTime_sorted, densErrAtTime_sorted):
+            print(f'{impact:>22.4f} {dens:>18.4e} {err:>18.4e}')
+
+    return
+
 if __name__ == "__main__":
 
     # Parse the command line arguments
@@ -165,5 +192,9 @@ if __name__ == "__main__":
     timesToPlot = np.array([2,3,4,5,6,7,8,9]) * 1e-3
 #    timesToPlot = np.arange(2, 8.1, 0.5) * 1e-3 # [s]
 #    timesToPlot = np.arange(4.5, 5.6, 0.1) * 1e-3 # [s]
-    
+
+    timesToPrint = np.array([7.828]) * 1e-3 # [s]
+
+    print_data(timesToPrint)    
     plot_data(timesToPlot)
+
