@@ -1734,7 +1734,7 @@ def plot_simulation_scan_panel(shotnum, metric=cm.normalized_mean_abs_error, sim
 
     return
 
-def compare_all_simulations(shotnum, metricList=None, makeIndividualPlots=True, makePanelPlot=True):
+def compare_all_simulations(shotnum, metricList=None, makeIndividualPlots=True, makePanelPlot=True, redoAnalysis=False):
     """
     Compare a given shot against every simulation in the scan directory, using every comparison metric.
 
@@ -1751,6 +1751,11 @@ def compare_all_simulations(shotnum, metricList=None, makeIndividualPlots=True, 
     makePanelPlot : bool
         Make the panel plot of the whole scan for each metric once all the data is computed.
         Default is True.
+    redoAnalysis : bool
+        Force the comparison to be recomputed for every simulation instead of loading the cached .npz files.
+        Use this whenever something upstream of the comparison changes, e.g. the experimental data
+        processing or a comparison metric, since the cached files are then stale.
+        Default is False.
 
     Returns
     -------
@@ -1775,6 +1780,7 @@ def compare_all_simulations(shotnum, metricList=None, makeIndividualPlots=True, 
 
             _, _, _ = compare_simulation_and_experiment(simNameList[i], shotnum,
                                                         metric = metric,
+                                                        redoAnalysis = redoAnalysis,
                                                         makeplot = makeIndividualPlots,
                                                         saveplot = makeIndividualPlots)
 
