@@ -12,6 +12,7 @@ import xarray as xr
 import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 from scipy.interpolate import NearestNDInterpolator
+import comparison_metrics as cm
 
 # Use TkAgg backend for interactive plotting
 plt.switch_backend('TkAgg')
@@ -20,8 +21,13 @@ plt.switch_backend('TkAgg')
 plt.rcParams.update({'font.size': 18})
 
 # Global variable to store the simulation scan directory
-global simulationScanDir
 simulationScanDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/withRadialDiff/'
+# simulationScanDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/'
+
+# Upper limit on the CQL3D ion density [m^-3]
+# A few time slices have unphysical spikes (up to ~1e299 m^-3) at a handful of mesh points,
+# far above the ~2e20 m^-3 peak of the densest simulations.
+maxIonDensity = 1e21
 
 def species_labels(filename):
     """
@@ -119,6 +125,9 @@ def ion_dens(filename, makeplot=False):
 
     # 1st one is ions, the 2nd is electrons.
     dens = dens[:, :, :, 0]
+
+    # Clip the unphysical density spikes
+    dens = np.clip(dens, a_min=None, a_max=maxIonDensity)
 
     # Major radius of z points (=r)
     # [cm] to [m]
@@ -378,6 +387,27 @@ def find_simulation_names():
 
     return simNameList
 
+def find_valid_time_slices(times):
+    """
+    Find the time slices to keep, dropping the CQL3D restart slices.
+
+    Each CQL3D output file starts with a restart slice at the same time as the last slice of
+    the previous output file. The restart slice sometimes contains garbage (up to ~1e299 m^-3),
+    so only the first slice at each time is kept.
+
+    Parameters
+    ----------
+    times : np.array
+        Time array, which may have repeated values. [s]
+
+    Returns
+    -------
+    keep : np.array
+        Boolean mask of the time slices to keep.
+    """
+
+    return np.concatenate(([True], np.diff(times) > 0))
+
 def generate_times_and_functions(simulationName, makeplot=False, saveplot=False):
     """
     Generate interpolation functions for the plasma density for every timestep of the simulation.
@@ -412,7 +442,10 @@ def generate_times_and_functions(simulationName, makeplot=False, saveplot=False)
         with open(simulationDir + 'density_interp_data.pkl', 'rb') as loadFile:
             saveData = pickle.load(loadFile)
 
-            interpFuncs = [generate_single_interpolation(dens, saveData['solrz'], saveData['solzz']) for dens in saveData['dens']]
+            # Clip the unphysical density spikes (older saved data is not clipped)
+            savedDens = np.clip(saveData['dens'], a_min=None, a_max=maxIonDensity)
+
+            interpFuncs = [generate_single_interpolation(dens, saveData['solrz'], saveData['solzz']) for dens in savedDens]
 
             times = saveData['times']
     
@@ -465,6 +498,11 @@ def generate_times_and_functions(simulationName, makeplot=False, saveplot=False)
 
         print(f'Saved interpolation data to- \n {savePath}')
 
+    # Drop the CQL3D restart slices
+    keep = find_valid_time_slices(times)
+    interpFuncs = [interpFuncs[i] for i in np.where(keep)[0]]
+    times = times[keep]
+
     if makeplot:
 
         # Load the saved data
@@ -478,7 +516,10 @@ def generate_times_and_functions(simulationName, makeplot=False, saveplot=False)
             # [Time x r x z]
             dens = saveData['dens']
 
-        dens = np.clip(dens, a_min=0, a_max=5e19)
+        # Drop the CQL3D restart slices and clip the unphysical density spikes
+        keep = find_valid_time_slices(times)
+        times = times[keep]
+        dens = np.clip(dens[keep], a_min=0, a_max=maxIonDensity)
 
         import matplotlib.animation as animation
 
@@ -674,6 +715,11 @@ def time_dependent_see_detector(simulationName, detDictList, makeplot=False, tim
                  syntheticSignal = syntheticSignal,
                  times = times)
 
+    # Drop the CQL3D restart slices (older saved data still contains them)
+    keep = find_valid_time_slices(times)
+    syntheticSignal = syntheticSignal[keep]
+    times = times[keep]
+
     # Put the data into the dictionaries
     for i in range(len(detDictList)):
 
@@ -758,9 +804,245 @@ def time_dependent_see_detector(simulationName, detDictList, makeplot=False, tim
             
     return detDictList
 
-def load_experimental_data(shotnum, makeplot=False):
+def _branch_interpolate(srcRadii, srcDens, srcSigma, targetRadii, radiusTol=0.0):
+    """
+    Linearly interpolate one branch (upper or lower) of the detector array onto a set of target radii.
+
+    The interpolation is done in radius (|impact parameter|) only, so the weights are the same at every
+    timestep and the whole 2D [detector x time] array can be interpolated in one shot.
+
+    Parameters
+    ----------
+    srcRadii : np.array
+        Absolute impact parameters of the detectors on this branch. [m]
+    srcDens : np.array
+        Line-integrated density of the detectors on this branch. [detector x time] [m^-2]
+    srcSigma : np.array
+        Uncertainty on the line-integrated density of the detectors on this branch. [detector x time] [m^-2]
+    targetRadii : np.array
+        Absolute impact parameters at which we want the branch evaluated. [m]
+    radiusTol : float
+        Distance by which a target radius is allowed to sit outside the branch and still count as covered. [m]
+        The branch is held flat over that distance. It is there to catch detectors whose partner on the
+        opposite branch is nominally at the same radius but is a fraction of a mm away.
+        Default is 0.0.
+
+    Returns
+    -------
+    densInterp : np.array
+        Branch line-integrated density evaluated at targetRadii. [target x time] [m^-2]
+    sigmaInterp : np.array
+        Branch uncertainty evaluated at targetRadii. [target x time] [m^-2]
+    inRange : np.array
+        Boolean array flagging the target radii that lie inside the radial coverage of this branch.
+        Values outside the coverage are clamped to the edge of the branch and should not be trusted.
+    """
+
+    nTime = srcDens.shape[1]
+
+    # A single detector cannot define a profile, so nothing on this branch is usable
+    if len(srcRadii) < 2:
+        return (np.zeros(shape=(len(targetRadii), nTime)),
+                np.zeros(shape=(len(targetRadii), nTime)),
+                np.zeros(len(targetRadii), dtype=bool))
+
+    # Sort the branch by radius
+    sortIdx = np.argsort(srcRadii)
+    srcRadii = srcRadii[sortIdx]
+    srcDens = srcDens[sortIdx]
+    srcSigma = srcSigma[sortIdx]
+
+    # Bracketing detectors for each target radius
+    hiIdx = np.clip(np.searchsorted(srcRadii, targetRadii), 1, len(srcRadii) - 1)
+    loIdx = hiIdx - 1
+
+    # Linear interpolation weight of the outer bracketing detector
+    weight = (targetRadii - srcRadii[loIdx]) / (srcRadii[hiIdx] - srcRadii[loIdx])
+    weight = np.clip(weight, 0, 1)[:, np.newaxis]
+
+    densInterp = (1 - weight) * srcDens[loIdx] + weight * srcDens[hiIdx]
+
+    # Uncertainties of the two bracketing detectors are independent, so they add in quadrature
+    sigmaInterp = np.sqrt(((1 - weight) * srcSigma[loIdx])**2 + (weight * srcSigma[hiIdx])**2)
+
+    # Flag the target radii the branch actually covers
+    inRange = (targetRadii >= srcRadii[0] - radiusTol) & (targetRadii <= srcRadii[-1] + radiusTol)
+
+    return densInterp, sigmaInterp, inRange
+
+def symmetrize_experimental_data(detDictList, nInnerSkip=4, radiusTol=2e-3):
+    """
+    Force the experimental line-integrated density to be up-down symmetric.
+
+    The synthetic diagnostic is built on a purely radial CQL3D profile, so it cannot reproduce any
+    up-down asymmetry in the data. This function removes that asymmetry from the measurement.
+
+    The detectors are not placed symmetrically about the midplane, so a detector above the midplane
+    generally has no partner at the same |impact parameter| below it. Instead of pairing detectors up,
+    the upper and lower halves of the array are each treated as a profile in radius (|impact parameter|),
+    and the symmetric profile is the average of the two branches interpolated onto a common radius. Each
+    detector then takes the value of that symmetric profile at its own radius. The branch interpolation
+    only uses radius, so the weights are time independent and the averaging is done for every timestep in
+    one vectorised operation.
+
+    Detectors are left untouched (and are excluded from the branch interpolation) when:
+        - They are one of the nInnerSkip innermost detectors. Their up-down asymmetry comes from the
+          viewing geometry, not from the plasma, so symmetrizing them would be wrong.
+        - They are the detector at the most negative impact parameter, which is railed/broken. This is the
+          same detector the rest of this module discards.
+        - Their radius is outside the radial coverage of the opposite branch, so there is nothing to
+          average against.
+        - They are outside the time window covered by every detector in the symmetrization set.
+
+    The raw data is kept under 'line_integrated_density_raw' and 'line_integrated_density_sigma_raw', and
+    the part of the signal removed by the symmetrization (raw - symmetrized) is stored under
+    'line_integrated_density_symmetrization_residual'.
+
+    Parameters
+    ----------
+    detDictList : list
+        List of detector dictionaries, as loaded from the cached experimental data.
+    nInnerSkip : int
+        Number of innermost detectors (smallest |impact parameter|) left unsymmetrized.
+        Default is 4.
+    radiusTol : float
+        Distance by which a detector is allowed to sit outside the radial coverage of the opposite branch
+        and still be symmetrized. [m]
+        The opposite branch is held flat over that distance. The detectors are not mirror images of each
+        other, so a pair that is meant to be at the same radius can be a fraction of a mm apart. Without
+        this the outer detector of such a pair would be dropped.
+        Default is 2e-3, which is well below the ~10 mm detector spacing.
+
+    Returns
+    -------
+    detDictList : list
+        The same list, with the symmetrized line-integrated density in 'line_integrated_density'.
+    """
+
+    # Detectors that actually have data
+    validIdxList = [i for i in range(len(detDictList)) if detDictList[i]['line_integrated_density'] is not None]
+
+    # Keep a copy of the raw data on every detector and default to 'not symmetrized'
+    for detDict in detDictList:
+
+        if detDict['line_integrated_density'] is None:
+            detDict['line_integrated_density_raw'] = None
+            detDict['line_integrated_density_sigma_raw'] = None
+            detDict['line_integrated_density_symmetrization_residual'] = None
+            detDict['symmetrized'] = False
+            continue
+
+        detDict['line_integrated_density'] = np.asarray(detDict['line_integrated_density'], dtype=float)
+        detDict['line_integrated_density_sigma'] = np.asarray(detDict['line_integrated_density_sigma'], dtype=float)
+
+        detDict['line_integrated_density_raw'] = detDict['line_integrated_density'].copy()
+        detDict['line_integrated_density_sigma_raw'] = detDict['line_integrated_density_sigma'].copy()
+        detDict['line_integrated_density_symmetrization_residual'] = np.zeros_like(detDict['line_integrated_density'])
+        detDict['symmetrized'] = False
+
+    if len(validIdxList) == 0:
+        print('No experimental data to symmetrize')
+        return detDictList
+
+    # Detector impact parameters [m]
+    impactParams = np.array([detDictList[i]['impact_param_vertical'] / 1e3 for i in validIdxList])
+
+    # Detectors excluded from the symmetrization
+    excludedIdxList = set()
+
+    # The detector at the most negative impact parameter is railed/broken
+    excludedIdxList.add(validIdxList[int(np.argmin(impactParams))])
+
+    # The innermost detectors are asymmetric because of the geometry, not the plasma
+    innerOrder = np.argsort(np.abs(impactParams))
+    for k in range(min(nInnerSkip, len(innerOrder))):
+        excludedIdxList.add(validIdxList[innerOrder[k]])
+
+    # Detectors we are going to symmetrize
+    symIdxList = [i for i in validIdxList if i not in excludedIdxList]
+
+    if len(symIdxList) < 2:
+        print('Not enough detectors left to symmetrize the experimental data')
+        return detDictList
+
+    symImpactParams = np.array([detDictList[i]['impact_param_vertical'] / 1e3 for i in symIdxList])
+
+    #### Put the detectors we are symmetrizing on a common time axis
+
+    timeArrList = [np.asarray(detDictList[i]['time_arr_slow']) for i in symIdxList]
+
+    # Time window covered by every detector in the symmetrization set
+    tStart = max([timeArr[0] for timeArr in timeArrList])
+    tStop = min([timeArr[-1] for timeArr in timeArrList])
+
+    if tStop <= tStart:
+        print('Detector time axes do not overlap. Skipping the symmetrization.')
+        return detDictList
+
+    # Use the best resolved detector inside that window as the common time axis
+    windowList = [timeArr[(timeArr >= tStart) & (timeArr <= tStop)] for timeArr in timeArrList]
+    commonTimeArr = windowList[int(np.argmax([len(window) for window in windowList]))]
+
+    densArr2D = np.zeros(shape=(len(symIdxList), len(commonTimeArr)))
+    sigmaArr2D = np.zeros(shape=(len(symIdxList), len(commonTimeArr)))
+    for k in range(len(symIdxList)):
+
+        densArr2D[k] = np.interp(commonTimeArr, timeArrList[k], detDictList[symIdxList[k]]['line_integrated_density_raw'])
+        sigmaArr2D[k] = np.interp(commonTimeArr, timeArrList[k], detDictList[symIdxList[k]]['line_integrated_density_sigma_raw'])
+
+    #### Average the two branches of the array in |impact parameter|
+
+    radii = np.abs(symImpactParams)
+
+    upperMask = symImpactParams > 0
+    lowerMask = symImpactParams < 0
+
+    upperDens, upperSigma, upperInRange = _branch_interpolate(radii[upperMask], densArr2D[upperMask], sigmaArr2D[upperMask], radii, radiusTol=radiusTol)
+    lowerDens, lowerSigma, lowerInRange = _branch_interpolate(radii[lowerMask], densArr2D[lowerMask], sigmaArr2D[lowerMask], radii, radiusTol=radiusTol)
+
+    # A detector can only be symmetrized where both branches have coverage
+    bothInRange = upperInRange & lowerInRange
+
+    symDensArr2D = np.where(bothInRange[:, np.newaxis], 0.5 * (upperDens + lowerDens), densArr2D)
+
+    # The two branches are independent measurements, so their uncertainties add in quadrature
+    symSigmaArr2D = np.where(bothInRange[:, np.newaxis], 0.5 * np.sqrt(upperSigma**2 + lowerSigma**2), sigmaArr2D)
+
+    #### Put the symmetrized data back on each detector's own time axis
+
+    for k in range(len(symIdxList)):
+
+        if not bothInRange[k]:
+            print(f"Detector at {symImpactParams[k]*1e3:.1f} mm has no partner on the opposite branch. Leaving it unsymmetrized.")
+            continue
+
+        detDict = detDictList[symIdxList[k]]
+        timeArr = timeArrList[k]
+
+        # Outside the common time window there is nothing to average against, so keep the raw data
+        inWindow = (timeArr >= commonTimeArr[0]) & (timeArr <= commonTimeArr[-1])
+
+        newDens = detDict['line_integrated_density_raw'].copy()
+        newSigma = detDict['line_integrated_density_sigma_raw'].copy()
+
+        newDens[inWindow] = np.interp(timeArr[inWindow], commonTimeArr, symDensArr2D[k])
+        newSigma[inWindow] = np.interp(timeArr[inWindow], commonTimeArr, symSigmaArr2D[k])
+
+        detDict['line_integrated_density'] = newDens
+        detDict['line_integrated_density_sigma'] = newSigma
+        detDict['line_integrated_density_symmetrization_residual'] = detDict['line_integrated_density_raw'] - newDens
+        detDict['symmetrized'] = True
+
+    return detDictList
+
+def load_experimental_data(shotnum, makeplot=False, symmetrize=True, nInnerSkip=4, radiusTol=2e-3):
     """
     Calculates the experimental data for a given shot number.
+
+    The raw data contains an up-down asymmetry that the synthetic diagnostic cannot reproduce, since it is
+    built on a purely radial CQL3D profile. By default the line-integrated density is therefore made
+    up-down symmetric before it is returned (see symmetrize_experimental_data). The cached file on disk is
+    never modified, only the data held in memory.
 
     Parameters
     ----------
@@ -768,6 +1050,16 @@ def load_experimental_data(shotnum, makeplot=False):
         Shot number for which we want to calculate the line-integrated plasma density.
     makeplot : bool
         Make a plot of the experimental data
+    symmetrize : bool
+        Force the line-integrated density to be up-down symmetric.
+        Default is True.
+    nInnerSkip : int
+        Number of innermost detectors left unsymmetrized, since their asymmetry is geometric.
+        Default is 4.
+    radiusTol : float
+        Distance by which a detector is allowed to sit outside the radial coverage of the opposite half of
+        the array and still be symmetrized. [m]
+        Default is 2e-3.
 
     Returns
     -------
@@ -785,112 +1077,6 @@ def load_experimental_data(shotnum, makeplot=False):
         with open(savename, 'rb') as file:
             detDictList = pickle.load(file)
 
-        if makeplot:
-
-            # Detector impact parameters [m]
-            impactParams = np.zeros(len(detDictList))
-            for i in range(len(impactParams)):
-
-                beam_pos = detDictList[i]['impact_param_vertical']
-                impactParams[i] = beam_pos / 1e3
-
-            # Get the line integrated densities and time array for each detector
-            densList = []
-            densErrList = []
-            timeArr2D = []
-            dataPresent = []
-            for i in range(len(impactParams)):
-
-                lineIntegratedDens = detDictList[i]['line_integrated_density']
-
-                if lineIntegratedDens is not None:
-                    densList.append(detDictList[i]['line_integrated_density'])
-                    densErrList.append(detDictList[i]['line_integrated_density_sigma'])
-                    timeArr2D.append(detDictList[i]['time_arr_slow'])
-                    dataPresent.append(True)
-                else:
-                    dataPresent.append(False)
-
-            # Remove the impact parameter with no data
-            impactParams = impactParams[dataPresent]
-
-            # Sort the data based on impactParams
-            sortIdx = np.argsort(impactParams)
-            impactParams = impactParams[sortIdx]
-            timeArr2D = [timeArr2D[i] for i in sortIdx]
-            densList = [densList[i] for i in sortIdx]
-            densErrList = [densErrList[i] for i in sortIdx]
-
-            # Remove the 1st detector (railed, broken)
-            impactParams = impactParams[1:]
-            timeArr2D = timeArr2D[1:]
-            densList = densList[1:]
-            densErrList = densErrList[1:]
-
-            # Put all the data on the same time axis
-            minFinalTime = 1e6
-            minTimeIdx = 0
-            for i in range(len(timeArr2D)):
-
-                finalTime = timeArr2D[i][-1]
-                if finalTime <= minFinalTime:
-                    finalTime = minFinalTime
-                    minTimeIdx = i
-
-            timeArr = timeArr2D[minTimeIdx]
-
-            densArr2D = np.zeros(shape=(len(densList), len(timeArr)))
-            densErrArr2D = np.zeros(shape=(len(densList), len(timeArr)))
-
-            for i in range(len(densList)):
-
-                densArr2D[i] = np.interp(timeArr, timeArr2D[i], densList[i])
-                densErrArr2D[i] = np.interp(timeArr, timeArr2D[i], densErrList[i])
-
-            fig = plt.figure(figsize=(12, 8), tight_layout=True)
-            ax = fig.add_subplot(111)
-
-            fig.suptitle(shotnum)
-
-            timeDelta = 1e-3
-
-            # Color each time point on a colormap
-            cmap = plt.get_cmap('viridis', len(timeArr)).colors
-
-            # Plot each timepoint
-            currTime = timeArr[0]
-            for i in range(len(timeArr)):
-
-                if timeArr[i] - currTime <= timeDelta:
-                    continue
-
-                currTime = timeArr[i]
-
-                ax.errorbar(impactParams*1e2, densArr2D[:, i], 
-                            yerr = densErrArr2D[:, i],
-                            fmt = 'o',
-                            ms = 10,
-                            color = cmap[i],
-                            elinewidth = 5,
-                            label = f'{np.round(timeArr[i]*1e3, 1)}')
-                ax.errorbar(impactParams*1e2, densArr2D[:, i], 
-                            yerr = 3*densErrArr2D[:, i],
-                            fmt = 'o',
-                            ms = 10,
-                            color = cmap[i])
-                ax.plot(impactParams*1e2, densArr2D[:, i],
-                        linewidth=2,
-                        color=cmap[i])
-
-            ax.legend(title='Time [ms]', ncols=3)
-            ax.set_xlabel('Impact Parameter [cm]')
-            ax.set_ylabel(r'$\int n_p \cdot dl$ [m$^{-2}$]')
-
-            ax.set_ylim(0, None)
-            ax.set_xlim(-np.max(np.abs(impactParams*1e2))*1.1, np.max(np.abs(impactParams*1e2))*1.1)
-
-            plt.show()
-
     except Exception as e:
 
         print(e)
@@ -907,61 +1093,143 @@ def load_experimental_data(shotnum, makeplot=False):
         with open(savename, 'rb') as file:
             detDictList = pickle.load(file)
 
+    # Remove the up-down asymmetry the synthetic diagnostic cannot capture
+    if symmetrize:
+        detDictList = symmetrize_experimental_data(detDictList, nInnerSkip=nInnerSkip, radiusTol=radiusTol)
+
+    if makeplot:
+
+        # Detector impact parameters [m]
+        impactParams = np.zeros(len(detDictList))
+        for i in range(len(impactParams)):
+
+            beam_pos = detDictList[i]['impact_param_vertical']
+            impactParams[i] = beam_pos / 1e3
+
+        # Get the line integrated densities, the symmetrization residual and the time array for each detector
+        densList = []
+        densErrList = []
+        residualList = []
+        timeArr2D = []
+        dataPresent = []
+        for i in range(len(impactParams)):
+
+            lineIntegratedDens = detDictList[i]['line_integrated_density']
+
+            if lineIntegratedDens is not None:
+                densList.append(detDictList[i]['line_integrated_density'])
+                densErrList.append(detDictList[i]['line_integrated_density_sigma'])
+                residualList.append(detDictList[i].get('line_integrated_density_symmetrization_residual',
+                                                       np.zeros_like(lineIntegratedDens)))
+                timeArr2D.append(detDictList[i]['time_arr_slow'])
+                dataPresent.append(True)
+            else:
+                dataPresent.append(False)
+
+        # Remove the impact parameter with no data
+        impactParams = impactParams[dataPresent]
+
+        # Sort the data based on impactParams
+        sortIdx = np.argsort(impactParams)
+        impactParams = impactParams[sortIdx]
+        timeArr2D = [timeArr2D[i] for i in sortIdx]
+        densList = [densList[i] for i in sortIdx]
+        densErrList = [densErrList[i] for i in sortIdx]
+        residualList = [residualList[i] for i in sortIdx]
+
+        # Remove the 1st detector (railed, broken)
+        impactParams = impactParams[1:]
+        timeArr2D = timeArr2D[1:]
+        densList = densList[1:]
+        densErrList = densErrList[1:]
+        residualList = residualList[1:]
+
+        # Put all the data on the same time axis
+        minFinalTime = 1e6
+        minTimeIdx = 0
+        for i in range(len(timeArr2D)):
+
+            finalTime = timeArr2D[i][-1]
+            if finalTime <= minFinalTime:
+                finalTime = minFinalTime
+                minTimeIdx = i
+
+        timeArr = timeArr2D[minTimeIdx]
+
+        densArr2D = np.zeros(shape=(len(densList), len(timeArr)))
+        densErrArr2D = np.zeros(shape=(len(densList), len(timeArr)))
+        residualArr2D = np.zeros(shape=(len(densList), len(timeArr)))
+
+        for i in range(len(densList)):
+
+            densArr2D[i] = np.interp(timeArr, timeArr2D[i], densList[i])
+            densErrArr2D[i] = np.interp(timeArr, timeArr2D[i], densErrList[i])
+            residualArr2D[i] = np.interp(timeArr, timeArr2D[i], residualList[i])
+
+        fig = plt.figure(figsize=(12, 12), tight_layout=True)
+        axDens = fig.add_subplot(211)
+        axRes = fig.add_subplot(212, sharex=axDens)
+
+        fig.suptitle(shotnum)
+
+        timeDelta = 1e-3
+
+        # Color each time point on a colormap
+        cmap = plt.get_cmap('viridis', len(timeArr)).colors
+
+        # Plot each timepoint
+        currTime = timeArr[0]
+        for i in range(len(timeArr)):
+
+            if timeArr[i] - currTime <= timeDelta:
+                continue
+
+            currTime = timeArr[i]
+
+            #### Symmetrized line-integrated density
+            axDens.errorbar(impactParams*1e2, densArr2D[:, i],
+                            yerr = densErrArr2D[:, i],
+                            fmt = 'o',
+                            ms = 10,
+                            color = cmap[i],
+                            elinewidth = 5,
+                            label = f'{np.round(timeArr[i]*1e3, 1)}')
+            axDens.errorbar(impactParams*1e2, densArr2D[:, i],
+                            yerr = 3*densErrArr2D[:, i],
+                            fmt = 'o',
+                            ms = 10,
+                            color = cmap[i])
+            axDens.plot(impactParams*1e2, densArr2D[:, i],
+                        linewidth=2,
+                        color=cmap[i])
+
+            #### Residual left behind by the symmetrization
+            axRes.plot(impactParams*1e2, residualArr2D[:, i],
+                       'o-',
+                       ms = 10,
+                       linewidth = 2,
+                       color = cmap[i])
+
+        axDens.legend(title='Time [ms]', ncols=3)
+        axDens.set_ylabel(r'Symmetrized $\int n_p \cdot dl$ [m$^{-2}$]')
+        axDens.set_ylim(0, None)
+
+        axRes.axhline(0, color='k', linewidth=1)
+        axRes.set_xlabel('Impact Parameter [cm]')
+        axRes.set_ylabel(r'Raw $-$ Symmetrized [m$^{-2}$]')
+
+        # Keep the residual centered on zero so the up-down asymmetry is easy to read
+        resLim = np.max(np.abs(residualArr2D))*1.1
+        if resLim > 0:
+            axRes.set_ylim(-resLim, resLim)
+
+        axDens.set_xlim(-np.max(np.abs(impactParams*1e2))*1.1, np.max(np.abs(impactParams*1e2))*1.1)
+
+        plt.show()
+
     return detDictList
 
-def single_time_comparison(expDataArr, expDataSigmaArr, simDataArr, impactParams, expTime, simTime):
-    """
-    Compares the simulation and experimental data and returns a single comparison metric.
-
-    Parameters
-    ----------
-    expDataArr : np.array
-        Line-integrated density from the experiment. [m^-2]
-    expDataSigmaArr : np.array
-        Error bars for the line-integrated density. [m^-2]
-    simDataArr : np.array
-        Line-integrated density from the simulation. [m^-2]
-    impactParams : np.array
-        Vertical impact parameter for each detector. [m]
-    expTime : float
-        Time for the experimental data. [s]
-    simTime : float
-        Time for the simulation data. [s]
-
-    Returns
-    -------
-    comparison : float
-        Metric that compares the simulation and experimental data.
-    """
-
-    # Normalize the data
-    # expNorm = expDataArr.max()
-    # expDataArr /= expNorm
-    # expDataSigmaArr /= expNorm
-
-    # simNorm = simDataArr.max()
-    # simDataArr /= simNorm
-
-    # Difference between the simulation and experiment
-    diff = expDataArr - simDataArr
-
-    absDiff = np.mean(np.abs(diff))
-
-    avgDens = np.mean(np.concatenate((expDataArr, simDataArr)))
-
-    return absDiff/avgDens
-
-    # # Root-squared of the difference
-    # rsDiff = (diff**2)**0.5
-
-    # # Weight it by the error bars
-    # weights = 1/expDataSigmaArr
-
-    # comparison = np.sum(rsDiff * weights)
-
-    # return comparison
-
-def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=False, makeplot=False, saveplot=False, tExpStart=None, tExpStop=None):
+def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normalized_mean_abs_error, redoAnalysis=False, makeplot=False, saveplot=False, tExpStart=None, tExpStop=None):
     """
     Compare the plasma density profiles between the CQL3D + KN1D simulation and the experimental result
 
@@ -971,6 +1239,9 @@ def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=Fals
         Simulation name we want to compare against.
     shotnum : int
         Shot number we want to compare against.
+    metric : function
+        Comparison metric from comparison_metrics.py.
+        Default is cm.normalized_mean_abs_error.
     redoAnalysis : bool
         Force redo of the analysis even if there is saved data.
         Default is False.
@@ -1001,15 +1272,18 @@ def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=Fals
     # All simulations are stored in the same directory
     simulationDir = simulationScanDir + simulationName + '/'
 
+    # Name of the comparison metric, used to label the saved data and plots
+    metricName = cm.metric_name(metric)
+
     try:
 
         if redoAnalysis:
             raise Exception('Forcing redo of the analysis')
 
-        print(f'Trying to load the comparison between shot {shotnum} and simulation {simulationName}')
+        print(f'Trying to load the {metricName} comparison between shot {shotnum} and simulation {simulationName}')
 
         # Open the comparison file for the given shot
-        filename = simulationDir + f'shot_comparison/{shotnum}.npz'
+        filename = simulationDir + f'shot_comparison/{shotnum}_{metricName}.npz'
 
         dataObj = np.load(filename)
 
@@ -1109,20 +1383,15 @@ def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=Fals
         expDataArr = expDataArr[1:]
         expDataSigmaArr = expDataSigmaArr[1:]
 
-        # Array to compare the simulation and experimental data
-        # [simTime x expTime]
-        comparisonArr = np.zeros(shape=(len(simTimeArr), len(expTimeArr)))
-
-        # Go over each time point and calculate the comparison
-        for i in range(len(simTimeArr)):
-            for j in range(len(expTimeArr)):
-
-                comparisonArr[i, j] = single_time_comparison(expDataArr = expDataArr[:, j],
-                                                             expDataSigmaArr = expDataSigmaArr[:, j],
-                                                             simDataArr = simDataArr[:, i],
-                                                             impactParams = impactParams,
-                                                             expTime = expTimeArr[j],
-                                                             simTime = simTimeArr[i])
+        # Compare every simulation time against every experimental time in one call.
+        # The metrics reduce over the first (detector) axis and broadcast over the rest,
+        # so the result is [simTime x expTime]
+        comparisonArr = metric(expDataArr = expDataArr[:, np.newaxis, :],
+                               expDataSigmaArr = expDataSigmaArr[:, np.newaxis, :],
+                               simDataArr = simDataArr[:, :, np.newaxis],
+                               impactParams = impactParams,
+                               expTime = expTimeArr[np.newaxis, :],
+                               simTime = simTimeArr[:, np.newaxis])
                 
         #### Save the data
 
@@ -1131,7 +1400,7 @@ def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=Fals
         os.makedirs(filename, exist_ok=True)
 
         # Save the data
-        filename = simulationDir + f'shot_comparison/{shotnum}.npz'
+        filename = simulationDir + f'shot_comparison/{shotnum}_{metricName}.npz'
 
         np.savez(filename,
                  comparisonArr = comparisonArr,
@@ -1158,8 +1427,10 @@ def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=Fals
         X, Y = np.meshgrid(expTimeArr*1e3, simTimeArr*1e3)
 
         # Define explicit log-spaced levels
-        vmin = max(1e-5, comparisonArr.min())  # Avoid zeros/negatives
-        vmax = comparisonArr.max()
+        # Ignore any non-finite values (e.g. overflow in the metric)
+        finiteArr = comparisonArr[np.isfinite(comparisonArr)]
+        vmin = max(1e-5, finiteArr.min())  # Avoid zeros/negatives
+        vmax = finiteArr.max()
         logLevels = np.logspace(np.log10(vmin), np.log10(vmax), 100)
 
         pltObj = ax.contourf(X, Y, comparisonArr, 
@@ -1172,7 +1443,7 @@ def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=Fals
 
         ax.set_aspect('equal')
 
-        ax.set_title(f'{shotnum} vs {simulationName}')
+        ax.set_title(f'{shotnum} vs {simulationName}\n{metricName}')
 
         cbar = fig.colorbar(pltObj)
         cbar.locator = ticker.LogLocator(base=10.0, numticks=10)
@@ -1185,7 +1456,7 @@ def compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=Fals
             saveDir = simulationDir + 'plots'
             os.makedirs(saveDir, exist_ok=True)
 
-            plt.savefig(saveDir+f'/{shotnum}_vs_{simulationName}.png', dpi=300)
+            plt.savefig(saveDir+f'/{shotnum}_vs_{simulationName}_{metricName}.png', dpi=300)
 
         plt.show()
 
@@ -1255,7 +1526,7 @@ def density_label(dens):
 
     return label
 
-def plot_simulation_scan_panel(shotnum, simNameList=None, tExpStart=None, tExpStop=None, vmin=None, vmax=None, saveplot=False):
+def plot_simulation_scan_panel(shotnum, metric=cm.normalized_mean_abs_error, simNameList=None, tExpStart=None, tExpStop=None, vmin=None, vmax=None, saveplot=False):
     """
     Make a panel plot of the comparison between the experiment and every
     simulation in the scan.
@@ -1265,15 +1536,18 @@ def plot_simulation_scan_panel(shotnum, simNameList=None, tExpStart=None, tExpSt
     colorbar so that they can be compared directly.
 
     This function only reads the pre-computed comparison data stored in
-    simulationScanDir + '{simulationName}/shot_comparison/{shotnum}.npz'.
+    simulationScanDir + '{simulationName}/shot_comparison/{shotnum}_{metricName}.npz'.
 
     Parameters
     ----------
     shotnum : int
         Shot number the simulations were compared against.
+    metric : function
+        Comparison metric from comparison_metrics.py that the data was computed with.
+        Default is cm.normalized_mean_abs_error.
     simNameList : list of str
         Simulations to include in the plot.
-        Default is None, in which case every directory in simulationScanDir is used.
+        Default is None, in which case every simulation in simulationScanDir is used.
     tExpStart : float
         Start time of the experimental data for plotting. [s]
         Default is None.
@@ -1302,6 +1576,9 @@ def plot_simulation_scan_panel(shotnum, simNameList=None, tExpStart=None, tExpSt
     if simNameList is None:
         simNameList = find_simulation_names()
 
+    # Name of the comparison metric, used to find the saved data and label the plot
+    metricName = cm.metric_name(metric)
+
     # =========================================================================
     # Load all the pre-computed comparison data
     # =========================================================================
@@ -1317,7 +1594,7 @@ def plot_simulation_scan_panel(shotnum, simNameList=None, tExpStart=None, tExpSt
             print(f'Could not parse the neutral densities from {simulationName}. Skipping it.')
             continue
 
-        filename = simulationScanDir + simulationName + f'/shot_comparison/{shotnum}.npz'
+        filename = simulationScanDir + simulationName + f'/shot_comparison/{shotnum}_{metricName}.npz'
 
         if not os.path.isfile(filename):
             print(f'No comparison data for {simulationName}. Skipping it.')
@@ -1341,7 +1618,7 @@ def plot_simulation_scan_panel(shotnum, simNameList=None, tExpStart=None, tExpSt
         dataDict[(mainVesselDens, gasBoxDens)] = (comparisonArr, simTimeArr, expTimeArr, simulationName)
 
     if len(dataDict) == 0:
-        print(f'No pre-computed comparison data found for shot {shotnum}.')
+        print(f'No pre-computed {metricName} comparison data found for shot {shotnum}.')
         return
 
     # =========================================================================
@@ -1359,12 +1636,15 @@ def plot_simulation_scan_panel(shotnum, simNameList=None, tExpStart=None, tExpSt
     # Shared color scale across every sub-plot
     # =========================================================================
 
+    # Ignore any non-finite values (e.g. overflow in the metric) when setting the color scale
+    finiteArrs = [arr[np.isfinite(arr)] for arr, _, _, _ in dataDict.values()]
+
     if vmin is None:
         # Smallest positive value across all the simulations
-        vmin = np.min([arr[arr > 0].min() for arr, _, _, _ in dataDict.values() if np.any(arr > 0)])
+        vmin = np.min([arr[arr > 0].min() for arr in finiteArrs if np.any(arr > 0)])
         vmin = max(1e-5, vmin)
     if vmax is None:
-        vmax = np.max([arr.max() for arr, _, _, _ in dataDict.values()])
+        vmax = np.max([arr.max() for arr in finiteArrs if arr.size > 0])
 
     # Common set of log-spaced levels so every panel uses the same colors
     logLevels = np.logspace(np.log10(vmin), np.log10(vmax), 100)
@@ -1439,7 +1719,7 @@ def plot_simulation_scan_panel(shotnum, simNameList=None, tExpStart=None, tExpSt
             cbar = fig.colorbar(pltObj, cax=cbarAx)
             cbar.locator = ticker.LogLocator(base=10.0, numticks=10)
             cbar.update_ticks()
-            cbar.set_label('Comparison', rotation=90)
+            cbar.set_label(metricName, rotation=90)
 
         if saveplot:
 
@@ -1447,26 +1727,29 @@ def plot_simulation_scan_panel(shotnum, simNameList=None, tExpStart=None, tExpSt
             saveDir = simulationScanDir + 'plots'
             os.makedirs(saveDir, exist_ok=True)
 
-            print(f'Saving the panel plot to {saveDir}/{shotnum}_scan_panel.png')
-            plt.savefig(saveDir + f'/{shotnum}_scan_panel.png', dpi=300)
+            print(f'Saving the panel plot to {saveDir}/{shotnum}_scan_panel_{metricName}.png')
+            plt.savefig(saveDir + f'/{shotnum}_scan_panel_{metricName}.png', dpi=300)
 
         plt.show()
 
     return
 
-def compare_all_simulations(shotnum, makeIndividualPlots=True, makePanelPlot=True):
+def compare_all_simulations(shotnum, metricList=None, makeIndividualPlots=True, makePanelPlot=True):
     """
-    Compare a given shot against every simulation in the scan directory.
+    Compare a given shot against every simulation in the scan directory, using every comparison metric.
 
     Parameters
     ----------
     shotnum : int
         Shot number we want to compare against.
+    metricList : list of functions
+        Comparison metrics from comparison_metrics.py.
+        Default is None, in which case every metric in cm.METRICS is used.
     makeIndividualPlots : bool
-        Make (and save) the individual comparison plot for each simulation.
+        Make (and save) the individual comparison plot for each simulation and metric.
         Default is True.
     makePanelPlot : bool
-        Make the panel plot of the whole scan once all the data is computed.
+        Make the panel plot of the whole scan for each metric once all the data is computed.
         Default is True.
 
     Returns
@@ -1474,22 +1757,31 @@ def compare_all_simulations(shotnum, makeIndividualPlots=True, makePanelPlot=Tru
     None
     """
 
+    # Use every metric by default
+    if metricList is None:
+        metricList = cm.METRICS
+
     # Find all the simulation names
     simNameList = find_simulation_names()
 
-    # Go over all the simulations and compare vs. experiment
-    for i in range(len(simNameList)):
+    for metric in metricList:
 
-        print(f'Comparing vs. {simNameList[i]}')
+        print(f'Using the comparison metric {cm.metric_name(metric)}')
 
-        _, _, _ = compare_simulation_and_experiment(simNameList[i], shotnum,
-                                                    makeplot = makeIndividualPlots,
-                                                    saveplot = makeIndividualPlots)
+        # Go over all the simulations and compare vs. experiment
+        for i in range(len(simNameList)):
 
-    # Now that all the data is pre-computed, make the panel plot of the scan
-    if makePanelPlot:
+            print(f'Comparing vs. {simNameList[i]}')
 
-        plot_simulation_scan_panel(shotnum, simNameList=simNameList, saveplot=True)
+            _, _, _ = compare_simulation_and_experiment(simNameList[i], shotnum,
+                                                        metric = metric,
+                                                        makeplot = makeIndividualPlots,
+                                                        saveplot = makeIndividualPlots)
+
+        # Now that all the data is pre-computed, make the panel plot of the scan
+        if makePanelPlot:
+
+            plot_simulation_scan_panel(shotnum, metric=metric, tExpStart=2.3e-3, tExpStop=12.5e-3, simNameList=simNameList, saveplot=True)
 
     return
 
@@ -1505,7 +1797,7 @@ if __name__ == '__main__':
     shotnum = 260426037
 
     # Load the experimental data for a given shot
-    # detDictList = load_experimental_data(shotnum, True)
+    detDictList = load_experimental_data(shotnum, True)
 
     # Load all the interpolation functions
     # interpFuncs, times = generate_times_and_functions(simulationName, makeplot=True, saveplot=True)
@@ -1520,4 +1812,4 @@ if __name__ == '__main__':
     # comparisonArr, simTimeArr, expTimeArr = compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=False, makeplot=True, saveplot=True)
 
     # Compare the experiment to all simulations
-    compare_all_simulations(shotnum, makeIndividualPlots=False, makePanelPlot=True)
+    # compare_all_simulations(shotnum, makeIndividualPlots=False, makePanelPlot=True)

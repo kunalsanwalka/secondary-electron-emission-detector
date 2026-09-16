@@ -4,10 +4,12 @@ This script plots the radial profiles of the simulation based on when they have 
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 import os
 import pickle
 
 from cql3d_vs_data import load_detector_dictionary, time_dependent_see_detector, load_experimental_data
+from cql3d_vs_data import find_simulation_names, find_valid_time_slices, maxIonDensity
 
 # Global variable to store the simulation scan directory
 global simulationScanDir
@@ -204,6 +206,7 @@ def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPl
     ax1.set_xticks([])
     ax1.set_xlim(-xLim, xLim)
 
+    ax1.set_title(f'{simulationName}')
     
     ax2.set_ylabel(r'$\int n_i \cdot dl$ [m$^{-2}$]')
     ax2.set_ylim(0, None)
@@ -259,15 +262,106 @@ def synthetic_interferometer(simulationName, makeplot=False):
 
     return times, synInf
 
+def plot_radial_profiles(timeDelta=0.5e-3, cmap='viridis'):
+    """
+    Plot the time dependent radial density profile at the midplane for every simulation in simulationScanDir.
+
+    The plot for each simulation is saved in- simulationScanDir + f'{simulationName}/plots/{simulationName}_time_dep_ne_prof.png'
+
+    Parameters
+    ----------
+    timeDelta : float
+        Time between the plotted radial profiles. [s]
+        Default is 0.5e-3.
+    cmap : str
+        Colormap used to color the profiles by time.
+        Default is 'viridis'.
+    """
+
+    simNameList = find_simulation_names()
+
+    for simulationName in simNameList:
+
+        print(f'Plotting the radial density profiles for {simulationName}')
+
+        # All simulations are stored in the same directory
+        simulationDir = simulationScanDir + simulationName + '/'
+
+        # Load the saved data
+        try:
+            with open(simulationDir + 'density_interp_data.pkl', 'rb') as loadFile:
+                saveData = pickle.load(loadFile)
+        except FileNotFoundError:
+            print(f'No saved 2D density profile data for {simulationName}, skipping')
+            continue
+
+        solrz = saveData['solrz']
+        times = saveData['times']
+
+        # [Time x r x z]
+        dens = saveData['dens']
+
+        # Drop the CQL3D restart slices and clip the unphysical density spikes
+        keep = find_valid_time_slices(times)
+        times = times[keep]
+        dens = np.clip(dens[keep], a_min=0, a_max=maxIonDensity)
+
+        # Indices of the simulation times closest to each timeDelta interval
+        timesToPlot = np.arange(0, times[-1] + timeDelta / 2, timeDelta)
+        timeIdxArr = np.unique([np.argmin(np.abs(times - t)) for t in timesToPlot])
+
+        # Color each profile by its time
+        norm = mpl.colors.Normalize(vmin=times[timeIdxArr[0]]*1e3, vmax=times[timeIdxArr[-1]]*1e3)
+        colormap = mpl.colormaps[cmap]
+
+        fig = plt.figure(figsize=(12, 8), tight_layout=True)
+        ax = fig.add_subplot(1, 1, 1)
+
+        for timeIdx in timeIdxArr:
+
+            # Radial profile at the midplane
+            radialProfile = dens[timeIdx, :, 0]
+
+            color = colormap(norm(times[timeIdx]*1e3))
+
+            ax.plot(solrz[:, 0], radialProfile,
+                    color=color,
+                    linewidth=3)
+            ax.plot(-solrz[:, 0], radialProfile,
+                    color=color,
+                    linewidth=3)
+
+        cbar = fig.colorbar(mpl.cm.ScalarMappable(norm=norm, cmap=colormap), ax=ax)
+        cbar.set_label('Time [ms]')
+
+        ax.set_title(simulationName)
+        ax.set_xlabel('Radius [m]')
+        ax.set_ylabel(r'n$_i$ [m$^{-3}$]')
+
+        ax.set_ylim(0, None)
+
+        # Make a directory to store plots if it does not already exist
+        saveDir = simulationDir + 'plots/'
+        os.makedirs(saveDir, exist_ok=True)
+
+        savePath = saveDir + f'{simulationName}_time_dep_ne_prof.png'
+        plt.savefig(savePath, dpi=150)
+        plt.close(fig)
+
+        print(f'Saved plot to- \n {savePath}')
+
+    return
+
 if __name__ == "__main__":
 
-    simName = 'nneut_5e18_gb_5e18_NBI_800kW_ECH_0kW_ionDrrOn'
+    simName = 'nneut_2e17_gb_2e17_NBI_800kW_ECH_0kW_ionDrrOn'
 
     # Times to plot (in seconds)
-    timesToPlotSim = np.array([3.5]) * 1e-3
-    timesToPlotExp = np.array([7.6]) * 1e-3
+    timesToPlotSim = np.array([4]) * 1e-3
+    timesToPlotExp = np.array([6]) * 1e-3
 
     shotnum = 260426037
 
-    plot_radial_and_synthetic(simName, shotnum, timesToPlotSim, timesToPlotExp)
+    plot_radial_profiles(timeDelta=0.5e-3, cmap='viridis')
+    # plot_radial_and_synthetic(simName, shotnum, timesToPlotSim, timesToPlotExp)
     # times, synInf = synthetic_interferometer(simName, makeplot=True)
