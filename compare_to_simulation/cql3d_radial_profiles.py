@@ -352,9 +352,84 @@ def plot_radial_profiles(timeDelta=0.5e-3, cmap='viridis'):
 
     return
 
-def plot_2d_density_contour(simulationName, timeToPlot, cmap='inferno'):
+def load_eqdsk_flux(simulationName):
+    """
+    Load the poloidal flux from the eqdsk of the last IPS timestep of the given simulation.
+
+    Parameters
+    ----------
+    simulationName : str
+        The name of the simulation.
+
+    Returns
+    -------
+    Rmesh : np.array
+        2D array of the radial coordinates of the eqdsk grid. [m]
+    Zmesh : np.array
+        2D array of the axial coordinates of the eqdsk grid. [m]
+    psi : np.array
+        2D array of the poloidal flux on the eqdsk grid. [Wb]
+    """
+
+    # All simulations are stored in the same directory
+    resultsDir = simulationScanDir + simulationName + '/simulation_results/'
+
+    # The IPS timestep directories are named after the time, so the last result is the biggest number
+    simTimes = []
+    for dirName in os.listdir(resultsDir):
+        try:
+            float(dirName)
+        except ValueError:
+            # Skips 'plasma_state' and anything else that is not a timestep
+            continue
+        simTimes.append(dirName)
+
+    lastSimTime = max(simTimes, key=float)
+
+    filenameEQDSK = resultsDir + lastSimTime + '/components/eq__pleiades_3/eqdsk'
+
+    with open(filenameEQDSK, 'r') as eqdskFile:
+        lines = eqdskFile.read().splitlines()
+
+    # Number of grid points in the radial (nw) and axial (nh) directions
+    nw, nh = [int(val) for val in lines[0].split()[-2:]]
+
+    # Values before the flux grid- 20 header values and the 4 1D profiles (fpol, pres, ffprim, pprime)
+    numValues = 20 + 4*nw + nw*nh
+
+    # The eqdsk is written in fixed width (16 character) fields with no guaranteed
+    # whitespace between them, so it cannot be parsed by splitting on whitespace
+    values = []
+    for line in lines[1:]:
+
+        line = line.rstrip()
+        values.extend([float(line[i:i+16]) for i in range(0, len(line), 16)])
+
+        if len(values) >= numValues:
+            break
+
+    values = np.array(values[:numValues])
+
+    # Size of the grid [m] and the location of its lower left corner
+    rdim, zdim = values[0], values[1]
+    rleft, zmid = values[3], values[4]
+
+    # [z x r]
+    psi = values[20 + 4*nw:].reshape(nh, nw)
+
+    r1D = np.linspace(rleft, rleft + rdim, nw)
+    z1D = np.linspace(zmid - zdim/2, zmid + zdim/2, nh)
+
+    Zmesh, Rmesh = np.meshgrid(z1D, r1D, indexing='ij')
+
+    return Rmesh, Zmesh, psi
+
+def plot_2d_density_contour(simulationName, timeToPlot, densCmap='inferno', 
+                            plotFluxSurfaces=True, fluxCmap='viridis', numFluxSurfaces=15):
     """
     Plot the 2D (R, Z) plasma density contour of the given simulation at the specified time.
+
+    The field lines from the eqdsk of the last IPS timestep are overlaid on top of the density.
 
     Parameters
     ----------
@@ -363,9 +438,18 @@ def plot_2d_density_contour(simulationName, timeToPlot, cmap='inferno'):
     timeToPlot : float
         The time at which to plot the 2D density profile. [s]
         The closest available simulation timestep is used.
-    cmap : str
-        Colormap used for the contour plot.
+    densCmap : str
+        Colormap used for the density contour.
         Default is 'inferno'.
+    plotFluxSurfaces : bool
+        Overlay the field lines from the eqdsk.
+        Default is True.
+    fluxCmap : str
+        Colormap used for the field lines.
+        Default is 'viridis'.
+    numFluxSurfaces : int
+        Number of field lines to plot.
+        Default is 15.
     """
 
     # All simulations are stored in the same directory
@@ -396,12 +480,32 @@ def plot_2d_density_contour(simulationName, timeToPlot, cmap='inferno'):
 
     levels = np.linspace(0, np.max(dens[timeIdx]), 100)
 
-    pltObj = ax.contourf(solzz, solrz, dens[timeIdx], levels=levels, cmap=cmap)
+    pltObj = ax.contourf(solzz, solrz, dens[timeIdx], levels=levels, cmap=densCmap)
 
     cbar = fig.colorbar(pltObj, ax=ax)
     cbar.set_label(r'n$_i$ [m$^{-3}$]')
 
-    ax.set_xlim(0, 0.8)
+    # Axial and radial extent of the plot
+    zLim = (0, 0.8)
+    rLim = (0, solrz.max())
+
+    if plotFluxSurfaces:
+
+        Rmesh, Zmesh, psi = load_eqdsk_flux(simulationName)
+
+        # Only use the flux inside the plotted region to set the field line spacing
+        inPlot = (Zmesh >= zLim[0]) & (Zmesh <= zLim[1]) & (Rmesh >= rLim[0]) & (Rmesh <= rLim[1])
+
+        # Evenly spaced in flux, dropping the 0 level as it is the machine axis
+        fluxLevels = np.linspace(0, psi[inPlot].max()*1e6, numFluxSurfaces + 1)[1:]
+
+        fluxObj = ax.contour(Zmesh, Rmesh, psi*1e6, levels=fluxLevels, cmap=fluxCmap, linewidths=2)
+
+        fluxCbar = fig.colorbar(fluxObj, ax=ax)
+        fluxCbar.set_label(r'$\psi$ [uWb]')
+
+    ax.set_xlim(zLim)
+    ax.set_ylim(rLim)
     ax.set_aspect('equal')
 
     ax.set_xlabel('Z [m]')
