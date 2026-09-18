@@ -1,0 +1,1131 @@
+import MDSplus as mds
+import numpy as np
+from scipy.optimize import curve_fit
+import matplotlib.pyplot as plt
+from scipy.interpolate import RectBivariateSpline
+from scipy.interpolate import interp1d
+import pandas as pd
+import math
+
+class axuvpy:
+    def __init__(self, shotnum, nod=20, slit_ref_r=38, 
+                 Rwall=36.2, Rflange=15.94*2.54, recal=-0.02902686628404144):
+        self.ref_doid_num = 11
+        self.nod = nod  # Number of diodes
+        self.shotnum = shotnum
+        self.slit_ref_r = slit_ref_r
+        self.Rwall = Rwall
+        self.Rflange = Rflange
+        self.recal_diode   = recal # rad offset from diode 11
+        #self.recal_diode   = -0.12200925
+        self.AssumR_Plasma = slit_ref_r
+
+        # rr = np.sqrt(x_axuv**2+y_axuv**2)
+        # tr = np.arctan(y_axuv/x_axuv)
+        # self.x_axuv = rr*np.cos(rr)
+        # self.y_axuv = rr*np.sin(rr)
+
+        # Automatically assign and initialize these when the class is instantiated
+        self.procTree  = mds.Tree('axuv', shotnum)
+        self.Phi_slit  = self.procTree.getNode('DIODEARRAY1.PHI_SLIT').getData().data()
+        self.time      = self.procTree.getNode('DIODEARRAY1.CH_01.PHOTOCURRENT').getData().dim_of().data()
+        
+        # Initialize the arrays
+        self.x_axuv = -self.slit_ref_r*np.cos(self.Phi_slit)
+        self.y_axuv =  self.slit_ref_r*np.sin(self.Phi_slit)
+        self.axuvData  = np.zeros((self.nod, len(self.time)))
+        self.Rarray    = np.zeros((self.nod))
+        self.Rs        = np.zeros_like(self.Rarray)
+        self.Phis      = np.zeros_like(self.Rs)
+        self.philist   = np.zeros_like(self.Phis) 
+        self.view_ang  = np.zeros_like(self.philist) 
+        self.dnum      = np.zeros_like(self.view_ang) 
+        self.S_eff     = np.zeros_like(self.dnum)
+        self.ref_real_axuv =  np.pi+self.Phi_slit #rad
+        
+        #np.abs(axuv.slit_ref_r - axuv.Rs*100)
+        # Call method to fill the arrays (optional)
+        self.populate_arrays()
+        self.philist = self.philist-self.recal_diode
+        self.dnum         = self.dnum.astype(int)
+        self.axuvData_cal = self.axuvData*(self.Rarray.reshape(len(self.Rarray),1))
+        #########no - signal#########
+        self.axuvData_cal[self.axuvData_cal < 0] = 0
+        
+        self.ref_doid_inx  = np.where(self.dnum==self.ref_doid_num)[0]
+        
+
+        
+        Rwalllist = np.full(1000, Rwall) 
+        theta_vals = np.linspace(0, 2 * np.pi, len(Rwalllist))
+        wham_x = Rwalllist*np.cos(theta_vals)
+        wham_y = Rwalllist*np.sin(theta_vals)
+        
+        self.wham_x_slit = wham_x - self.x_axuv
+        self.wham_y_slit = wham_y - self.y_axuv
+        
+        self.WHAM_R     = np.sqrt(self.wham_x_slit**2 + self.wham_y_slit**2)
+        self.WHAM_theta = np.arctan2(self.wham_y_slit, self.wham_x_slit)
+        wham_y = self.WHAM_R*np.sin(self.WHAM_theta)
+        wham_x = self.WHAM_R*np.cos(self.WHAM_theta)
+        self.min_wham_y = np.min(wham_y)
+        self.min_wham_x = np.min(wham_x)
+        self.max_wham_y = np.max(wham_y)
+        self.max_wham_x = np.max(wham_x)
+        self.d_loc = np.abs(self.Rs*100-self.slit_ref_r)
+        self.ass_impact = np.tan(self.philist- self.ref_real_axuv)*self.slit_ref_r
+        self.philist_ref = self.philist-self.ref_real_axuv
+
+    def populate_arrays(self):
+        # Collecting data from the tree and populating the arrays
+        #for idx in range(self.nod):
+        try:
+            for idx in range(self.nod):
+                self.philist[idx]     = self.procTree.getNode(f'DIODEARRAY1.CH_{idx+1:02d}.LOS_DEG').getData().data()/180*np.pi+(self.ref_real_axuv)
+                #print(self.procTree.getNode(f'DIODEARRAY1.CH_{idx+1:02d}.LOS_DEG').getData().data(), self.philist[idx]*180/np.pi)
+                self.view_ang[idx]    = self.procTree.getNode(f'DIODEARRAY1.CH_{idx+1:02d}.AOV_DEG').getData().data()
+                self.S_eff[idx]       = self.procTree.getNode(f'DIODEARRAY1.CH_{idx+1:02d}.V_PEAK').getData().data()
+                self.dnum[idx]        = self.procTree.getNode(f'DIODEARRAY1.CH_{idx+1:02d}.DIODE_NUM').getData().data()
+   
+    
+                self.axuvData[idx, :] = self.procTree.getNode(f'DIODEARRAY1.CH_{idx+1:02d}.PHOTOCURRENT').getData().data()
+                self.Rarray[idx]      = self.procTree.getNode(f'DIODEARRAY1.CH_{idx+1:02d}.RESISTOR').getData().data()
+                self.Rs[idx]          = self.procTree.getNode(f'DIODEARRAY1.CH_{idx+1:02d}.R').getData().data()
+                self.Phis[idx]        = self.procTree.getNode(f'DIODEARRAY1.CH_{idx+1:02d}.PHI').getData().data()
+                
+            self.S_eff = self.S_eff/max(self.S_eff)
+            self.axuvData = self.axuvData/(self.S_eff.reshape(len(self.S_eff),1))
+            if self.shotnum <= 241218032:
+                self.dnum[5] = 15        
+        
+        except Exception as e:
+            #self.recal_diode = -0.09724126727115814
+            self.recal_diode = 0
+            print(f"Error processing serial number {self.shotnum}: {e}")
+            for idx in range(self.nod):
+                self.axuvData[idx, :] = self.procTree.getNode(f'DIODEARRAY1.CH_{idx+1:02d}.PHOTOCURRENT').getData().data()
+                self.Rarray[idx]      = self.procTree.getNode(f'DIODEARRAY1.CH_{idx+1:02d}.RESISTOR').getData().data()
+                self.Rs[idx]          = self.procTree.getNode(f'DIODEARRAY1.CH_{idx+1:02d}.R').getData().data()
+                self.Phis[idx]        = self.procTree.getNode(f'DIODEARRAY1.CH_{idx+1:02d}.PHI').getData().data()
+
+            xss = self.Rs * np.cos(self.Phis)
+            yss = self.Rs * np.sin(self.Phis)
+            ms = (self.slit_ref_r / 100 * np.sin(self.Phi_slit) - yss) / (self.slit_ref_r / 100 * np.cos(self.Phi_slit) - xss)
+            self.philist       = np.arctan2(ms, 1)  # Storing the result as a class attribute
+            self.mean_los = (self.philist[:-1]+self.philist[1:])/2
+            self.view_ang = np.diff(self.mean_los)
+            self.view_ang = np.hstack([[(self.mean_los[0]-self.philist[0])*2], self.view_ang, [(self.philist[-1]-self.mean_los[-1])*2]])
+            self.view_ang = np.abs(self.view_ang)             
+            self.dnum     = np.linspace(1, self.nod, self.nod).astype(int)[::-1]
+            
+    def rmin_max(self, thetap, xs, ys, Rw):
+    
+        Rg  = ys*np.sin(thetap) + xs*np.cos(thetap)
+        Rsl = np.sqrt(ys**2+xs**2) 
+        Rn1 = 2*Rg+np.sqrt(4*Rg**2-4*(Rsl**2-Rw**2))
+        Rn2 = 2*Rg-np.sqrt(4*Rg**2-4*(Rsl**2-Rw**2))
+        return Rn1/2, Rn2/2
+
+    def corners(self, diode_list_one):
+        from scipy.signal import find_peaks
+
+        axuv_all_f = diode_list_one
+        # peaks, _ = find_peaks(np.diff(axuv_all_f), height=0.1, distance = len(axuv_all_f))
+        # lpeaks, _ = find_peaks(-np.diff(axuv_all_f)[::-1], height=0.1, distance = len(axuv_all_f))
+        # lpeaks = len(axuv_all_f)- lpeaks
+        mi_peak  = np.argmax(axuv_all_f)
+        peaks   = [mi_peak]
+        lpeaks  = [mi_peak]
+        con_rais = np.argmax(axuv_all_f[peaks[0]]/peaks[0]* np.arange(0, peaks[0])- axuv_all_f[:peaks[0]])
+
+        fall_m = np.diff((axuv_all_f[[lpeaks[0], -1]])/(len(axuv_all_f)-lpeaks[0]))[0] 
+        fall_c = axuv_all_f[-1]
+        con_fall = np.argmax( -(axuv_all_f[lpeaks[0]:] -fall_m*(-np.arange(0,len(axuv_all_f)-lpeaks[0])[::-1])-fall_c)  )+lpeaks[0]
+        
+        
+        corners = np.array([con_rais,con_fall])
+
+        return corners
+
+    def AXUV_analysis(self, signal, coordinate, time_coor, signal_dig_khz, whamc_list=None): # signal is a [#_of_detector, timestep] shape array: coordinate same
+                                                                  # whamc = None -> search cooridinate = 0 as wham center;
+        signal[signal < 0] = 0                                    # "mean" -> using mean short centriod
+        nod_local  = signal.shape[0]                              # [.....] -> array like input for each noT
+        not_local  = signal.shape[1]
+        dnum       = np.linspace(1, nod_local, nod_local).astype(int)
+        totalsignal= np.sum(signal, axis=0)+1e-20
+
+        # Compute RMS Radius evolution in time
+        meanphi     = np.sum(signal * coordinate, axis=0) / totalsignal
+        rms_coor    = np.sqrt(np.sum(signal*(coordinate-meanphi)**2, axis=0) / totalsignal)
+        
+        # nan_indices = np.where(np.isnan(rms_coor))
+        # print("totalsignal", (totalsignal[nan_indices[0]]))
+        
+        #np.sqrt(np.sum(signal*(coordinate-meanphi)**2, axis=0) / totalsignal)
+        #print(totalsignal)
+        # Compute C.M.  evolution in time
+        
+        cm_dnum = np.sum(signal * dnum[::-1].reshape(nod_local, 1), axis=0) / totalsignal
+        
+        cm_coor = meanphi
+
+        # Compute "C1/N" evolution in time        
+        # asy_axuvData_cal    = signal - signal[::-1, :]
+        # dnumhr              = np.linspace(1, nod_local, nod_local*100)
+        # import time
+        # start_sequential = time.time()
+        
+        # # asy_axuvData_cal_hr = np.array([interp1d(dnum.T, asy_axuvData_cal[:, i], kind='cubic')(dnumhr)
+        # #                                 for i in range(asy_axuvData_cal.shape[1])])
+        # # print(np.argmax(asy_axuvData_cal_hr, 0).shape,np.argmax(asy_axuvData_cal_hr, 1))
+        # # rhot_c      = dnumhr[np.argmax(asy_axuvData_cal_hr, 1)]
+        # end_sequential = time.time()
+       
+
+        # start_parallel = time.time()
+        # # Parallelized interpolation
+        
+        phi_edge = max(abs(self.philist_ref[0]), abs(self.philist_ref[-1]))
+        dnumhr = np.linspace(-phi_edge+self.ref_real_axuv, phi_edge+self.ref_real_axuv, 101)
+        # asy_axuvData_cal    = signal - signal[::-1, :]
+        #dnumhr              = np.linspace(1, nod_local, nod_local*100)
+        # Create the interpolation function
+        # interp_func = RectBivariateSpline(dnum, np.arange(asy_axuvData_cal.shape[1]), asy_axuvData_cal)
+        interp_func = RectBivariateSpline(self.philist[::-1], np.arange(signal.shape[1]), signal[::-1])
+        # Interpolate on a finer grid
+        # asy_axuvData_cal_hr = interp_func(dnumhr, np.arange(asy_axuvData_cal.shape[1]))
+        signal_hr           = interp_func(dnumhr, np.arange(signal.shape[1]))
+        asy_axuvData_cal_hr = signal_hr[::-1, :]-signal_hr
+        #print(np.argmax(asy_axuvData_cal_hr, 0).shape,np.argmax(asy_axuvData_cal_hr, 0))
+        
+        # end_parallel = time.time()
+        
+
+        # sequential_time = end_sequential - start_sequential
+        # parallel_time = end_parallel - start_parallel
+        #print((sequential_time, parallel_time))
+        
+        rhot_c1      = dnumhr[::-1][np.argmax(asy_axuvData_cal_hr, 0)]+self.ref_real_axuv
+        
+        
+        if whamc_list is None:
+            #where_whamc = [index for index, row in enumerate(coordinate) for element in row if element == 0]
+            #whamc       = dnum[where_whamc]
+            whamc       = self.ref_real_axuv
+        elif whamc_list == "mean":
+            whamc       = np.mean(cm_coor[not_local//4:not_local*3//4])
+        # c1n         = abs((cm_dnum-whamc)/(rhot_c-whamc))  
+        else:
+            whamc = whamc_list
+        c1n1         = abs((cm_coor-whamc)/(rhot_c1-whamc))  
+
+        # smoothc1n1 = self.butter_lowpass_filter(c1n1, 1000,  1) 
+        # plt.plot(time_coor, self.butter_lowpass_filter(c1n1, 30000,  1))
+        # plt.plot(time_coor, self.butter_lowpass_filter(c1n1, 1000,  1))
+        # plt.ylim([0,1])
+        # plt.show()
+        
+        #signal_dig_khz = 1
+        
+        determinants = []
+        # Sample DataFrame with variation
+        data = {
+            'CM': np.sin(cm_coor- self.ref_real_axuv)*self.slit_ref_r, #cm_coor
+            'R' : 2*self.slit_ref_r*np.sin(rms_coor)                   #rms_coor
+        }
+        df = pd.DataFrame(data)
+        
+        # Calculate the rolling covariance matrix
+        # this is what it will actually do!!!!!!!!
+        #   cov_matrix[s][0,0] = np.std((cm_coor[0+s:wt+s]))**2/(wt-1)*wt
+        #   cov_matrix[s][1,1]sirmssq = np.std((rms_coor[0+s:wt+s]))**2/(wt-1)*wt
+        #   cov_matrix[s][0,1] = np.sum((cm_coor[0+s:wt+s]-np.mean(cm_coor[0+s:wt+s]))*(rms_coor[0+s:wt+s]-np.mean(rms_coor[0+s:wt+s])))/(wt-1)
+        #   cov_matrix[s][1,0] = np.sum((cm_coor[0+s:wt+s]-np.mean(cm_coor[0+s:wt+s]))*(rms_coor[0+s:wt+s]-np.mean(rms_coor[0+s:wt+s])))/(wt-1)
+        # determinants[s] = np.sqrt(cov_matrix[s][0,0]*cov_matrix[s][1,1]-cov_matrix[s][0,1]*cov_matrix[s][1,0])
+
+        
+        maxdev = 0
+        realmaxdev = 0
+        detv_list = {}
+        for jjh in range(len(signal_dig_khz)):
+
+            window_size = 1/signal_dig_khz[jjh]*1000
+            wt = int((window_size))
+            rolling_cov_matrix = df.rolling(window=wt).cov()
+            determinants = []
+            
+            for i in range(wt - 1, len(df)):
+                # Extract the rolling covariance matrix at each index
+                cov_matrix = rolling_cov_matrix.loc[i].values.reshape(len(df.columns), -1)    
+                # Calculate the determinant if the matrix is square
+                det = np.linalg.det(cov_matrix)
+                determinants.append(np.sqrt(det))
+                #determinants.append(np.sqrt(cov_matrix[0,0]))
+                #print(f"Determinant of rolling covariance matrix at index {i}: {det*1e6:.4f}")
+        
+            detv = np.array(determinants)
+            detv_list[f"{jjh}_dev"] = detv
+            detv_list[f"{jjh}_t"]   = time_coor[np.arange(wt - 1, len(df))-wt//2]
+            
+            # ax_lb.plot(VPIC['timelist'][np.arange(wt - 1, len(df))-wt//2],
+            #                detv, linewidth=2)
+            # ax_lb.semilogy(
+            #     VPIC['timelist'][np.arange(wt - 1, len(df)) - wt // 2],
+            #     detv,
+            #     linewidth=2
+            # )
+            
+            maxdev = max(detv)
+            realmaxdev = max([realmaxdev, maxdev])
+
+        
+        return cm_dnum, cm_coor, rms_coor, c1n1, detv_list
+
+    
+    def butter_lowpass_filter(self, data, cutoff,  order):
+        from scipy.signal import butter,filtfilt
+        fs = 1/(self.time[1] - self.time[0])
+        nyq = 0.5 * fs
+        normal_cutoff = cutoff / nyq
+        # Get the filter coefficients 
+        b, a = butter(order, normal_cutoff, btype='low', analog=False)
+        y = filtfilt(b, a, data)
+        return y
+
+    def plot_CM_2D(self, cm_stab,rms_coor, bint, centroid_r, nol, xy_relsolution, focuswindow,  ax):
+
+        from scipy.optimize import curve_fit
+  
+        # Define Gaussian function
+        def gaussian(x, A, mu, sigma):
+            return A * np.exp(-((x - mu)**2) / (2 * sigma**2))
+
+        # Example data (replace with your actual `cm_stab` data)
+        #cm_stab = np.random.uniform(0, 2 * np.pi, 6000)  # Simulated data
+        # bint = 500
+        noms = cm_stab.shape[0]//bint
+        fitfit   = np.zeros([noms, 3])
+        fitfit_r = np.zeros([noms, 3])
+        # Loop through the data in segments
+        
+        for k in range(noms):
+            #plt.figure(figsize=(8, 4))
+        
+            # Segment the data
+            #data_segment = cm_stab[k * 1000:(k + 1) * 1000] * 180 / np.pi
+            st_ind = k * bint
+            if k == noms -1 : 
+                ed_ind = -1
+            else:
+                ed_ind = (k + 1) * bint
+            #print(rms_coor[st_ind:ed_ind])    
+            data_segment   = self.slit_ref_r*np.cos(( self.ref_real_axuv+ cm_stab[st_ind:ed_ind]))
+            data_segment_r = np.sin(rms_coor[st_ind:ed_ind])*self.slit_ref_r*2
+            
+            # Create the histogram
+            # counts, bins, _ = plt.hist(data_segment,bins=20, edgecolor="black", alpha=0.7, label="Data")
+            counts, bins     = np.histogram(data_segment, bins=20)
+            counts_r, bins_r = np.histogram(data_segment_r, bins=20)
+            # Compute bin centers
+            bin_centers = (bins[:-1] + bins[1:]) / 2
+            bin_centers_r = (bins_r[:-1] + bins_r[1:]) / 2
+            # Initial guesses for A, mu, sigma
+            initial_guess   = [max(counts), np.mean(data_segment), np.std(data_segment)]
+            initial_guess_r = [max(counts_r), np.mean(data_segment_r), np.std(data_segment_r)]
+            # Perform the fit
+            
+            A, mu, std       = initial_guess  # Handle fit failures gracefully
+            A_r, mu_r, std_r = initial_guess_r
+
+            # try:
+            #     popt, pcov     = curve_fit(gaussian, bin_centers, counts, p0=initial_guess)
+            #     popt_r, pcov_r = curve_fit(gaussian, bin_centers_r, counts_r, p0=initial_guess_r)
+                
+            #     A, mu, std       = popt
+            #     A_r, mu_r, std_r = popt_r
+            # except RuntimeError as e:
+            #     print(f"Fit failed with error: {e}", " k = "+ str(k))
+            #     A, mu, std       = initial_guess  # Handle fit failures gracefully
+            #     A_r, mu_r, std_r = initial_guess_r
+
+            #print(popt, k, A, mu, std)
+            # Generate Gaussian fit curve
+            # x = np.linspace(bins[0], bins[-1], 500)
+            # p = gaussian(x, A, mu, std)
+            fitfit[k,:]   = [A, mu, std]
+            fitfit_r[k,:] = [A_r, mu_r, std_r]
+        # centroid_r = 20 #cm
+        # nol        = 20
+        # Define the grid for 2D Gaussian
+        mean_centriod = np.mean(fitfit, 0)[1]
+        
+        x = np.linspace(-centroid_r, centroid_r, xy_relsolution)+mean_centriod
+        y = np.linspace(-centroid_r, centroid_r, xy_relsolution)-self.y_axuv
+
+        # rrr     = np.linspace(np.mean(fitfit_r[:,1])-10*np.mean(fitfit_r[:,2]), np.mean(fitfit_r[:,1])+10*np.mean(fitfit_r[:,2]), xy_relsolution)
+        # thetarr = np.linspace(0, 360, xy_relsolution)
+
+        
+        
+        # RRR, TTT = np.meshgrid(rrr, thetarr)
+        X, Y = np.meshgrid(x, y)
+
+        # X_R = RRR*np.cos(TTT)-axuv.x_axuv
+        # Y_R = RRR*np.sin(TTT)-axuv.y_axuv
+
+        
+
+        
+        Z   = X*0
+        Z_r = X*0
+        # Compute the 2D Gaussian
+        from scipy.integrate import dblquad
+        for k in range(noms):
+            #print(np.sqrt(np.abs(self.slit_ref_r**2-fitfit[k,1]**2)))
+            RRsq = ((X - fitfit[k,1])**2 + (Y -np.sqrt(np.abs(self.slit_ref_r**2-fitfit[k,1]**2)))**2)
+            # RRRsq = ((X - fitfit[k,1])**2 + (Y -np.sqrt(self.slit_ref_r**2-fitfit[k,1]**2))**2)
+            # Z   = Z   + fitfit[k,0]/(np.sqrt(2*np.pi)*fitfit[k,2])/noms   * np.exp(-         RRsq        / (2 * fitfit[k,2]**2+1e-20))
+            # Z_r = Z_r + fitfit_r[k,0]/(np.sqrt(2*np.pi)*fitfit_r[k,2])/noms * np.exp(-(np.sqrt(RRsq)-fitfit_r[k,1])**2 / (2 * fitfit_r[k,2]**2+1e-20))
+            Z   = Z   + 1/(np.sqrt(2*np.pi)*fitfit[k,2])**2/noms   * np.exp(-         RRsq        / (2 * fitfit[k,2]**2+1e-20))
+            Z_r = Z_r + 1/(np.sqrt(2*np.pi)*fitfit_r[k,2])**2/noms * np.exp(-(np.sqrt(RRsq)-fitfit_r[k,1])**2 / (2 * fitfit_r[k,2]**2+1e-20))
+            
+        Z_r = Z_r/np.sum(Z_r*(x[1]-x[0])*(y[1]-y[0])+1e-20)    
+        # print(np.sum(Z*(x[1]-x[0])*(y[1]-y[0])), np.sum(Z_r*(x[1]-x[0])*(y[1]-y[0])))     
+                    
+        from matplotlib.colors import Normalize
+        from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+        # Plot the 2D Gaussian
+        #plt.figure(figsize=(6, 5))
+        #plt.contour(X, Y, Z, levels=nol, cmap="viridis", linewidths=0.5)
+        # plt.colorbar(label="Density")
+        # plt.title("2D Gaussian Distribution")
+        # plt.xlabel("x")
+        # plt.ylabel("y")
+        # plt.xlim([-65, 25])
+        # plt.ylim([-10, 75])
+        # plt.grid(True)
+        # plt.gca().set_aspect('equal')  # Set aspect ratio to be equal
+        # plt.show()
+
+        
+        
+        max_plv   = 30
+        max_plv_r = 0.06
+
+        # print(np.max(Z))
+        # print(np.max(Z_r))
+        Z = np.nan_to_num(Z, nan=0)
+        Z_r = np.nan_to_num(Z_r, nan=0)
+        if np.max(Z) == 0:
+            plt_nol   = 100
+        else:
+            plt_nol   = int((nol+1)*max_plv)
+
+        if np.max(Z) == 0:
+            plt_nol_r = 100
+        else:
+            plt_nol_r = int((nol+1)/np.max(Z_r)*max_plv_r)
+            
+        #print(0.01*np.max(Z), max_plv, plt_nol)
+        #print(0.005*np.max(Z_r), max_plv_r, plt_nol_r)
+        
+        levels   = np.linspace(0.01*np.max(Z), max_plv, plt_nol)
+        levels_r = np.linspace(0.005*np.max(Z_r), max_plv_r, plt_nol_r)
+        levels_p = np.linspace(0, max_plv, 100)
+        levels_pr= np.linspace(0, max_plv_r, 120)
+        norm   = Normalize(vmin = 0, vmax = max_plv)  # Normalization for colorbar
+        norm_r = Normalize(vmin = 0, vmax = max_plv_r)  # Normalization for colorbar
+
+        # Create contour plot
+        contour_r = ax.contour(X, Y, Z_r, levels=levels_r, cmap="plasma", linewidths=0.8, norm=norm_r)
+        contour   = ax.contour(X, Y, Z ,   levels=levels, cmap="hot", linewidths=1, norm=norm)
+        contour_p = ax.contour(X, Y, Z*0 , levels=levels_p, cmap="hot", linewidths=1, norm=norm)
+        contour_pr = ax.contour(X, Y, Z*0 , levels=levels_pr, cmap="plasma", linewidths=0.8, norm=norm_r)
+        # Add colorbar
+        # cbar = plt.colorbar(contour)
+        # cbar.set_label("Colorbar Label")
+        # cbar.set_ticks(np.linspace(0, 1000, 11))  # Set specific ticks for the colorba  
+
+        from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+        meanxcen = np.mean(fitfit[:,1])
+        meanycen = np.sqrt(np.abs(self.slit_ref_r**2 - meanxcen**2))
+        
+        # Inset plot in the lower-right corner
+        inset_ax = inset_axes(ax, width="18%", height="18%", loc="lower left")  # 30% size relative to the main plot
+        inset_ax.contour(X, Y, Z , levels=levels, cmap="hot", linewidths=0.5, norm=norm)
+        inset_ax.set_title("Centroid", fontsize = 8)
+        inset_ax.grid(True)
+        inset_ax.set_xticks([])  # Remove the ticks on the angular axis
+        inset_ax.set_yticks([])  # Remove the ticks on the radial axis
+
+        inset_ax.set_xlim(meanxcen - focuswindow/2, meanxcen + focuswindow/2)
+        inset_ax.set_ylim(meanycen - focuswindow/2, meanycen + focuswindow/2)
+        #print(fitfit[:,1])
+        # Add colorbar inside the inset plot
+        cbar_ax = inset_axes(inset_ax, width="10%", height="80%", loc="lower right", borderpad=0)  # Position inside inset
+        cbar    = plt.colorbar(contour_p, cax=cbar_ax, orientation="vertical")
+       
+        # Add extra level with custom color (e.g., green)
+        cbar.ax.tick_params(length=0, labelsize=4)  # Adjust colorbar tick size
+        cbar.set_ticks([0, 5, 10,  15, 20, 25])  # Set custom ticks
+        
+        cbar.set_ticklabels(["0", "5",  "10", "15", "20", "25"])  # Optionally customize tick labels
+        cbar.set_label("Probability\nDensity [cm$^{-2}$]", fontsize=4, labelpad=1)
+        cbar.ax.hlines(y=np.max(Z), xmin=0, xmax=1, colors="chartreuse", linewidth=2, label="max")
+
+        cbarr_ax = inset_axes(ax, width="5%", height="20%", loc="lower right", borderpad=1)  # Position inside inset
+        cbarr    = plt.colorbar(contour_pr, cax=cbarr_ax, orientation="vertical")
+
+        # Add extra level with custom color (e.g., green)
+        cbarr.ax.tick_params(length=0, labelsize=6)  # Adjust colorbar tick size
+        cbarr.set_ticks([0, 0.01, 0.02,  0.03, 0.04, 0.05])  # Set custom ticks
+    
+        cbarr.set_ticklabels(["0", "1",  "2",  "3",  "4",  "5"])  # Optionally customize tick labels
+        cbarr.set_label("Probability\nDensity [m$^{-2}$]", fontsize=6, labelpad=2)
+        cbarr.ax.hlines(y=np.max(Z_r), xmin=0, xmax=1, colors="lime", linewidth=2, label="max")
+        # Move label to the left
+        cbarr.ax.yaxis.set_label_position("left")  # Position label on the left
+        cbarr.ax.yaxis.tick_left()  # Move ticks to the left if needed
+        # ax.text(19, -9, "X1e2",         
+        #         fontsize=6, color='black', ha='center', va='center') #plot_axuv_line_y[1][-1]+2, rotation=-12 
+        ax.text(19, 13, "Radius",         
+                fontsize=8, color='black', ha='center', va='center') #plot_axuv_line_y[1][-1]+2, rotation=-12        
+        ax.text(-49, 7.8, str(focuswindow)+"X"+str(focuswindow)+" cm",         
+                fontsize=4, color='black', ha='center', va='center') #plot_axuv_line_y[1][-1]+2, rotation=-12 
+        # ax.text(-48, -9.2, "X1e3",         
+        #         fontsize=4, color='black', ha='center', va='center') #plot_axuv_line_y[1][-1]+2, rotation=-12 
+
+        
+        return fitfit
+
+#    def plot_CM_2D(self, cm_stab,rms_coor, bint, centroid_r, nol, xy_relsolution, focuswindow,  ax):
+#
+#        from scipy.optimize import curve_fit
+#  
+#        # Define Gaussian function
+#        def gaussian(x, A, mu, sigma):
+#            return A * np.exp(-((x - mu)**2) / (2 * sigma**2))
+#
+#        # Example data (replace with your actual `cm_stab` data)
+#        #cm_stab = np.random.uniform(0, 2 * np.pi, 6000)  # Simulated data
+#        # bint = 500
+#        noms = cm_stab.shape[0]//bint
+#        fitfit   = np.zeros([noms, 3])
+#        fitfit_r = np.zeros([noms, 3])
+#        # Loop through the data in segments
+#        
+#        for k in range(noms):
+#            #plt.figure(figsize=(8, 4))
+#        
+#            # Segment the data
+#            #data_segment = cm_stab[k * 1000:(k + 1) * 1000] * 180 / np.pi
+#            st_ind = k * bint
+#            if k == noms -1 : 
+#                ed_ind = -1
+#            else:
+#                ed_ind = (k + 1) * bint
+#            #print(rms_coor[st_ind:ed_ind])    
+#            data_segment   = self.slit_ref_r*np.cos(( self.ref_real_axuv+ cm_stab[st_ind:ed_ind]))
+#            data_segment_r = np.sin(rms_coor[st_ind:ed_ind])*self.slit_ref_r*2
+#            
+#            # Create the histogram
+#            # counts, bins, _ = plt.hist(data_segment,bins=20, edgecolor="black", alpha=0.7, label="Data")
+#            counts, bins     = np.histogram(data_segment, bins=20)
+#            counts_r, bins_r = np.histogram(data_segment_r, bins=20)
+#            # Compute bin centers
+#            bin_centers = (bins[:-1] + bins[1:]) / 2
+#            bin_centers_r = (bins_r[:-1] + bins_r[1:]) / 2
+#            # Initial guesses for A, mu, sigma
+#            initial_guess   = [max(counts), np.mean(data_segment), np.std(data_segment)]
+#            initial_guess_r = [max(counts_r), np.mean(data_segment_r), np.std(data_segment_r)]
+#            # Perform the fit
+#            
+#            try:
+#                popt, pcov     = curve_fit(gaussian, bin_centers, counts, p0=initial_guess)
+#                popt_r, pcov_r = curve_fit(gaussian, bin_centers_r, counts_r, p0=initial_guess_r)
+#                
+#                A, mu, std       = popt
+#                A_r, mu_r, std_r = popt_r
+#            except RuntimeError as e:
+#                print(f"Fit failed with error: {e}", " k = "+ str(k))
+#                A, mu, std       = [0,0,1]  # Handle fit failures gracefully
+#                A_r, mu_r, std_r = [0,0,1]
+#
+#            #print(popt, k, A, mu, st[]d)
+#            # Generate Gaussian fit curve
+#            # x = np.linspace(bins[0], bins[-1], 500)
+#            # p = gaussian(x, A, mu, std)
+#            fitfit[k,:]   = [A, mu, std]
+#            fitfit_r[k,:] = [A_r, mu_r, std_r]
+#            #print(fitfit)
+#            #print(fitfit_r)
+#        # centroid_r = 20 #cm
+#        # nol        = 20
+#        # Define the grid for 2D Gaussian
+#        mean_centriod = np.mean(fitfit, 0)[1]
+#        
+#        x = np.linspace(-centroid_r, centroid_r, xy_relsolution)+mean_centriod
+#        y = np.linspace(-centroid_r, centroid_r, xy_relsolution)-self.y_axuv
+#
+#        # rrr     = np.linspace(np.mean(fitfit_r[:,1])-10*np.mean(fitfit_r[:,2]), np.mean(fitfit_r[:,1])+10*np.mean(fitfit_r[:,2]), xy_relsolution)
+#        # thetarr = np.linspace(0, 360, xy_relsolution)
+#
+#        
+#        
+#        # RRR, TTT = np.meshgrid(rrr, thetarr)
+#        X, Y = np.meshgrid(x, y)
+#
+#        # X_R = RRR*np.cos(TTT)-axuv.x_axuv
+#        # Y_R = RRR*np.sin(TTT)-axuv.y_axuv
+#
+#        
+#
+#        
+#        Z   = X*0
+#        Z_r = X*0
+#        # Compute the 2D Gaussian
+#        from scipy.integrate import dblquad
+#        for k in range(noms):
+#            RRsq = ((X - fitfit[k,1])**2 + (Y -np.sqrt(self.slit_ref_r**2-fitfit[k,1]**2))**2)
+#            # RRRsq = ((X - fitfit[k,1])**2 + (Y -np.sqrt(self.slit_ref_r**2-fitfit[k,1]**2))**2)
+#            # Z   = Z   + fitfit[k,0]/(np.sqrt(2*np.pi)*fitfit[k,2])/noms   * np.exp(-         RRsq        / (2 * fitfit[k,2]**2+1e-20))
+#            # Z_r = Z_r + fitfit_r[k,0]/(np.sqrt(2*np.pi)*fitfit_r[k,2])/noms * np.exp(-(np.sqrt(RRsq)-fitfit_r[k,1])**2 / (2 * fitfit_r[k,2]**2+1e-20))
+#            Z   = Z   + 1/(np.sqrt(2*np.pi)*fitfit[k,2])**2/noms   * np.exp(-         RRsq        / (2 * fitfit[k,2]**2+1e-20))
+#            Z_r = Z_r + 1/(np.sqrt(2*np.pi)*fitfit_r[k,2])**2/noms * np.exp(-(np.sqrt(RRsq)-fitfit_r[k,1])**2 / (2 * fitfit_r[k,2]**2+1e-20))
+#        #------------Added 1-31-25------------------------------------------------------------
+#        Z[np.isnan(Z)] = 0
+#        Z_r = Z_r/np.sum(Z_r*(x[1]-x[0])*(y[1]-y[0]))    
+#        # print(np.sum(Z*(x[1]-x[0])*(y[1]-y[0])), np.sum(Z_r*(x[1]-x[0])*(y[1]-y[0])))     
+#                    
+#        from matplotlib.colors import Normalize
+#        from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+#        # Plot the 2D Gaussian
+#        #plt.figure(figsize=(6, 5))
+#        #plt.contour(X, Y, Z, levels=nol, cmap="viridis", linewidths=0.5)
+#        # plt.colorbar(label="Density")
+#        # plt.title("2D Gaussian Distribution")
+#        # plt.xlabel("x")
+#        # plt.ylabel("y")
+#        # plt.xlim([-65, 25])
+#        # plt.ylim([-10, 75])
+#        # plt.grid(True)
+#        # plt.gca().set_aspect('equal')  # Set aspect ratio to be equal
+#        # plt.show()
+#        
+#        max_plv   = 30
+#        max_plv_r = 0.06
+#
+#        #print(Z)
+#        # print(np.max(Z_r))
+#        #------------------Added 1-31-25------------------------------------------------------
+#        if np.max(Z) == 0:
+#            plt_nol   = int((nol+1)/1000*max_plv)
+#            plt_nol_r = int((nol+1)/1000*max_plv_r)
+#            
+#            levels   = np.linspace(0.01*1000, max_plv, plt_nol)
+#            levels_r = np.linspace(0.005*1000, max_plv_r, plt_nol_r)
+#        else:
+#            plt_nol   = int((nol+1)/np.max(Z)*max_plv)
+#            plt_nol_r = int((nol+1)/np.max(Z_r)*max_plv_r)
+#        
+#            levels   = np.linspace(0.01*np.max(Z), max_plv, plt_nol)
+#            levels_r = np.linspace(0.005*np.max(Z_r), max_plv_r, plt_nol_r)
+#
+#        levels_p = np.linspace(0, max_plv, 100)
+#        levels_pr= np.linspace(0, max_plv_r, 120)
+#        norm   = Normalize(vmin = 0, vmax = max_plv)  # Normalization for colorbar
+#        norm_r = Normalize(vmin = 0, vmax = max_plv_r)  # Normalization for colorbar
+#
+#        # Create contour plot
+#        contour_r = ax.contour(X, Y, Z_r, levels=levels_r, cmap="plasma", linewidths=0.8, norm=norm_r)
+#        contour   = ax.contour(X, Y, Z ,   levels=levels, cmap="hot", linewidths=1, norm=norm)
+#        contour_p = ax.contour(X, Y, Z*0 , levels=levels_p, cmap="hot", linewidths=1, norm=norm)
+#        contour_pr = ax.contour(X, Y, Z*0 , levels=levels_pr, cmap="plasma", linewidths=0.8, norm=norm_r)
+#        # Add colorbar
+#        # cbar = plt.colorbar(contour)
+#        # cbar.set_label("Colorbar Label")
+#        # cbar.set_ticks(np.linspace(0, 1000, 11))  # Set specific ticks for the colorba  
+#
+#        from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+#        meanxcen = np.mean(fitfit[:,1])
+#        if meanxcen**2 > self.slit_ref_r**2:
+#            meanxcen = 0
+#        meanycen = np.sqrt(self.slit_ref_r**2 - meanxcen**2)
+#        # Inset plot in the lower-right corner
+#        inset_ax = inset_axes(ax, width="18%", height="18%", loc="lower left")  # 30% size relative to the main plot
+#        inset_ax.contour(X, Y, Z , levels=levels, cmap="hot", linewidths=0.5, norm=norm)
+#        inset_ax.set_title("Centroid", fontsize = 8)
+#        inset_ax.grid(True)
+#        inset_ax.set_xticks([])  # Remove the ticks on the angular axis
+#        inset_ax.set_yticks([])  # Remove the ticks on the radial axis
+#        inset_ax.set_xlim(meanxcen - focuswindow/2, meanxcen + focuswindow/2)
+#        inset_ax.set_ylim(meanycen - focuswindow/2, meanycen + focuswindow/2)
+#        #print(fitfit[:,1])
+#        # Add colorbar inside the inset plot
+#        cbar_ax = inset_axes(inset_ax, width="10%", height="80%", loc="lower right", borderpad=0)  # Position inside inset
+#        cbar    = plt.colorbar(contour_p, cax=cbar_ax, orientation="vertical")
+#       
+#        # Add extra level with custom color (e.g., green)
+#        cbar.ax.tick_params(length=0, labelsize=4)  # Adjust colorbar tick size
+#        cbar.set_ticks([0, 5, 10,  15, 20, 25])  # Set custom ticks
+#        
+#        cbar.set_ticklabels(["0", "5",  "10", "15", "20", "25"])  # Optionally customize tick labels
+#        cbar.set_label("Probability\nDensity [cm$^{-2}$]", fontsize=4, labelpad=1)
+#        cbar.ax.hlines(y=np.max(Z), xmin=0, xmax=1, colors="chartreuse", linewidth=2, label="max")
+#
+#        cbarr_ax = inset_axes(ax, width="5%", height="20%", loc="lower right", borderpad=1)  # Position inside inset
+#        cbarr    = plt.colorbar(contour_pr, cax=cbarr_ax, orientation="vertical")
+#
+#        # Add extra level with custom color (e.g., green)
+#        cbarr.ax.tick_params(length=0, labelsize=6)  # Adjust colorbar tick size
+#        cbarr.set_ticks([0, 0.01, 0.02,  0.03, 0.04, 0.05])  # Set custom ticks
+#    
+#        cbarr.set_ticklabels(["0", "1",  "2",  "3",  "4",  "5"])  # Optionally customize tick labels
+#        cbarr.set_label("Probability\nDensity [m$^{-2}$]", fontsize=6, labelpad=2)
+#        cbarr.ax.hlines(y=np.max(Z_r), xmin=0, xmax=1, colors="lime", linewidth=2, label="max")
+#        # Move label to the left
+#        cbarr.ax.yaxis.set_label_position("left")  # Position label on the left
+#        cbarr.ax.yaxis.tick_left()  # Move ticks to the left if needed
+#        # ax.text(19, -9, "X1e2",         
+#        #         fontsize=6, color='black', ha='center', va='center') #plot_axuv_line_y[1][-1]+2, rotation=-12 
+#        ax.text(19, 13, "Radius",         
+#                fontsize=8, color='black', ha='center', va='center') #plot_axuv_line_y[1][-1]+2, rotation=-12        
+#        ax.text(-49, 7.8, str(focuswindow)+"X"+str(focuswindow)+" cm",         
+#                fontsize=4, color='black', ha='center', va='center') #plot_axuv_line_y[1][-1]+2, rotation=-12 
+#        # ax.text(-48, -9.2, "X1e3",         
+#        #         fontsize=4, color='black', ha='center', va='center') #plot_axuv_line_y[1][-1]+2, rotation=-12 
+#
+#        
+#        return fitfit    
+
+
+
+    def plot_WHAM(self, ax):
+        #fig = ax.figure(constrained_layout=True, figsize=(4, 4), dpi=100)
+        
+        ax.set_aspect('equal')
+        
+        # for idx in range(0, axuv.nod):
+        #     ax.plot(np.full(1000, axuv.line_of_sight[idx]*np.pi/180), np.linspace(0, axuv.Rn1[idx], 1000), 'w', linewidth = 0.1)
+        #     ax.plot(np.full(100 , (axuv.line_of_sight[idx]-180)*np.pi/180), np.linspace(0, axuv.d_loc[idx], 100 ), 'w', linewidth = 0.1)
+
+        # Add text "E" at (60, 40)
+        ax.text(21, 32, "E", fontsize=18, color='purple', ha='center', va='center', fontweight='bold')
+        ax.text(-60.5, 32, "W", fontsize=18, color='purple', ha='center', va='center', fontweight='bold')
+        ax.text(-20, -7, "WHAM", fontsize=12, color='black', ha='center', va='center', fontweight='bold')#, rotation=-26
+        ax.text(2, -3, "AXUV", fontsize=8, color='black', ha='center', va='center', rotation=26)
+        
+        ax.scatter([0], [0], color='orange', s=50)
+        philist_rel = (self.philist-self.ref_real_axuv)
+        axuv_wham_R = (self.slit_ref_r*2-self.slit_ref_r+self.Rwall)*np.cos(philist_rel)
+        los_slit    = philist_rel -  self.ref_real_axuv + np.pi
+        
+        plot_axuv_line_x = [axuv_wham_R*np.cos(los_slit)*0, axuv_wham_R*np.cos(los_slit)]
+        plot_axuv_line_y = [axuv_wham_R*np.cos(los_slit)*0, axuv_wham_R*np.sin(los_slit)]
+        ax.plot(plot_axuv_line_x, plot_axuv_line_y, color='black', linestyle='--', linewidth=0.5)
+        
+        ax.scatter(-self.x_axuv, -self.y_axuv, color='red', s=20, marker='+', linewidths=1)
+        ax.plot(self.wham_x_slit, self.wham_y_slit, color='gray', linewidth=3)  # Plot with correct theta values
+        
+        
+        ax.text(plot_axuv_line_x[1][-1]+2, 73, "diode#"+str(self.dnum[-1]),         
+                fontsize=8, color='black', ha='center', va='center') #plot_axuv_line_y[1][-1]+2, rotation=-12 
+        ax.text(plot_axuv_line_x[1][0]-2,  73,  "diode#"+str(self.dnum[0]), 
+                fontsize=8, color='black', ha='center', va='center')  #plot_axuv_line_y[1][0]+2, rotation=70
+        ax.grid(False)  # This will remove the grid lines
+        ax.set_xticks([])  # Remove the ticks on the angular axis
+        ax.set_yticks([])  # Remove the ticks on the radial axis
+        #ax.set_ylim([0, self.slit_ref_r+self.Rwall+25])
+        ax.set_xlim([-65, 25])
+        ax.set_ylim([-10, 75])
+        return ax
+
+    def plot_axuv_raw_intime(self, ax, start_do, stop_do, step):
+        import matplotlib.cm as cm
+        # Define start, stop, and interval
+        # start_do = start +trims
+        # stop_do  = stop + trime 
+        # step =  200
+        num_lines = len(range(start_do, stop_do + 1, step))  # Total number of lines
+        
+        # Create plasma colormap
+        cmap = plt.cm.plasma
+        colors = cmap(np.linspace(0, 1, num_lines))  # Generate colors in "plasma"
+        
+        # Create the plot and add lines
+    
+        for idx, i in enumerate(range(start_do, stop_do + 1, step)):
+            ax.plot(self.ass_impact, self.axuvData_cal[:, i]*1e3, linewidth = 0.8, color=colors[idx])
+        
+        # Set plot limits, ticks, and labels
+        ax.set_xlim(-20, 20)
+        #ax.set_xticks(range(1, 21))  # Set x-axis ticks from 1 to 20
+        ax.set_xlabel("NE   IP at WHAM center [cm]   SW", fontsize=8, fontweight='bold')
+        ax.set_ylabel("Raw [mV]", fontsize=8, fontweight='bold')
+        ax.tick_params(axis='y', labelsize = 6, direction = "in")
+        ax.tick_params(axis='x', labelsize = 6, direction = "in")  # Remove x-axis ticks
+
+        # ax.set_title("SN# "+str(sn)+" " + str(round(self.time[start_do]*1e3, 2)) +
+        #              " to " + str(round(self.time[stop_do]*1e3, 2)) +
+        #              " ms in " + str(round((self.time[step]-self.time[0])*1e3, 2)) +
+        #              " ms Interval Steps", fontsize = 10)
+        
+        # Add color bar to the figure
+        # Define the time range for the color bar
+        time_start = self.time[start_do] * 1e3  # Convert to milliseconds
+        time_stop = self.time[stop_do] * 1e3    # Convert to milliseconds
+        
+        # Update the color normalization
+        sm = cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=start_do, vmax=stop_do))
+        sm.set_array([])  # Dummy array for the color bar
+        
+        # Create the color bar
+        cbar = plt.colorbar(sm, ax=ax, aspect=5, pad=0.02)
+        cbar.set_label("Time [ms]", fontsize=8, fontweight='bold')  # Label for the color bar
+        cbar.ax.tick_params(direction="in")
+        # Set color bar ticks
+        cbar.set_ticks(np.linspace(start_do, stop_do, 5))  # Customize tick positions
+        cbar.ax.set_yticklabels([f"{tick:.1f}" for tick in np.linspace(time_start, time_stop, 5)], fontsize=6)  # Optional: Format ticks
+        # plt.savefig(str(sn)+"_axuv_overview_IP.jpg")
+        # # Show the plot
+        # plt.show()
+
+
+    def symmetric_extraction(self, cm_coor, xmesh, start, stop):
+        from scipy.ndimage import gaussian_filter
+        from scipy.signal import find_peaks
+        
+        xst = -36
+        xed =  36
+        #xmesh = 611
+        
+        Ncm = len(cm_coor)
+        
+        decter_x_list        = np.zeros([xmesh, Ncm])
+        smoothed_signal_list = np.zeros([xmesh, Ncm])
+        y_new_list           = np.zeros([xmesh, Ncm])
+        y_rawlist = {}
+        x_rawlist = {}
+        real_coor_aftermean = (self.philist - cm_coor.reshape(Ncm,1))
+        real_detector_cm_aftermean = (np.tan(real_coor_aftermean)*self.slit_ref_r).T
+        
+        decter_x = np.linspace(xst, xed, xmesh)
+        y_all    = self.axuvData_cal[:, start:stop]-np.min(self.axuvData_cal[:, start:stop], axis = 0)*0.2
+        
+        for i in range(Ncm):
+            
+            y_original = y_all.copy()[::-1, i]
+            x_original = real_detector_cm_aftermean[::-1, i]
+            
+            if np.mean(y_original,0) > 0.002:
+                # Calculate slopes and intercepts using the mean of adjacent edge elements
+                leftslope = ((y_original[0] + y_original[1]) / 2 - (y_original[1] + y_original[2]) / 2) / \
+                            ((x_original[0] + x_original[1]) / 2 - (x_original[1] + x_original[2]) / 2)
+                
+                rightslope = ((y_original[-1] + y_original[-2]) / 2 - (y_original[-2] + y_original[-3]) / 2) / \
+                             ((x_original[-1] + x_original[-2]) / 2 - (x_original[-2] + x_original[-3]) / 2)
+                
+                left_intercept = (y_original[0] + y_original[1]) / 2 - leftslope * (x_original[0] + x_original[1]) / 2
+                right_intercept = (y_original[-1] + y_original[-2]) / 2 - rightslope * (x_original[-1] + x_original[-2]) / 2
+                
+                # Calculate x-intercepts
+                left_xinter = -left_intercept / (leftslope-1e-20)
+                righ_xinter = -right_intercept / (rightslope-1e-20)
+                
+                # Calculate intermediate points using the linear falling edge
+                left_x_mid = (left_xinter + (x_original[0] + x_original[1]) / 2) / 2
+                left_y_mid = leftslope * left_x_mid + left_intercept
+                
+                right_x_mid = (righ_xinter + (x_original[-1] + x_original[-2]) / 2) / 2
+                right_y_mid = rightslope * right_x_mid + right_intercept
+                
+                # leftslope  = (y_original[1]-y_original[0])/(x_original[1]-x_original[0])
+                # rightslope  = (y_original[-1]-y_original[-2])/(x_original[-1]-x_original[-2]) 
+                # left_intercept = y_original[0] - leftslope * x_original[0]
+                # right_intercept = y_original[-1] - rightslope * x_original[-1]
+                # left_xinter = -left_intercept / leftslope
+                # righ_xinter = -right_intercept / rightslope
+    
+    
+    
+                # # Calculate intermediate points using the linear falling edge
+                # left_x_mid = (left_xinter + x_original[0]) / 2
+                # left_y_mid = leftslope * left_x_mid + left_intercept
+            
+                # right_x_mid = (righ_xinter + x_original[-1]) / 2
+                # right_y_mid = rightslope * right_x_mid + right_intercept
+    
+                
+                try:
+                    # Pad data with outermost points and midpoints
+                    y_padded = np.concatenate([[0], [left_y_mid], y_original, [right_y_mid], [0]])
+                    x_padded = np.concatenate([[left_xinter], [left_x_mid], x_original, [right_x_mid], [righ_xinter]])
+                
+                    # Perform cubic interpolation
+                    f = interp1d(x_padded, y_padded, kind='cubic', bounds_error=False, fill_value=0)
+                except:
+                    # Pad data with outermost points and midpoints
+                    y_padded = y_original
+                    x_padded = x_original
+                
+                    # Perform cubic interpolation
+                    f = interp1d(x_padded, y_padded, kind='cubic', bounds_error=False, fill_value=0)   
+                y_rawlist[str(i)] = y_padded
+                x_rawlist[str(i)] = x_padded    
+                # left_xinter  = -left_intercept/leftslope
+                # righ_xinter  = -right_intercept/rightslope
+                # print(left_xinter, righ_xinter)
+                
+                # y = np.pad(y_all[::-1, i], pad_width=1, mode='constant', constant_values=0)
+                # xpeak = real_detector_cm_aftermean[::-1, i][np.argmax(y_all[::-1, i])]
+                # x = np.pad(real_detector_cm_aftermean[::-1, i], pad_width=1, mode='constant', constant_values=(xst, xed))
+                # f = interp1d(x, y, kind='cubic')  # Interpolate for each column
+            
+                y_new = f(decter_x)
+                y_newa = y_new -np.maximum((y_new - y_new[::-1]), 0)
+            else:
+                y_new = decter_x*0
+                y_newa = y_new
+            print(f"\rsymmetric extraction on frame : {i}", end="\r")
+            decter_x_recm = decter_x + (np.tan(cm_coor[i]-self.ref_real_axuv )*self.slit_ref_r)
+            
+            # Example signal with spiky peaks
+            
+            
+            # try:
+            # Detect peaks
+            peaks, _ = find_peaks(y_newa, prominence=np.max(y_newa)/100)  # Adjust prominence to detect spikes
+            
+            # Create a mask for smoothing around the peaks
+            smoothing_radius = 40  # Points to smooth around each peak
+            mask = np.zeros_like(y_newa, dtype=bool)
+            for peak in peaks:
+                start_peak = max(0, peak - smoothing_radius)
+                end_peak = min(len(y_newa), peak + smoothing_radius)
+                mask[start_peak:end_peak] = True
+            
+            # Apply Gaussian filter selectively
+            smoothed_signal = y_newa.copy()
+            smoothed_signal[mask] = gaussian_filter(y_newa, sigma=2)[mask]
+            # except:
+            #     smoothed_signal = y_newa.copy()
+                
+            decter_x_list[:, i ]        = decter_x_recm
+            smoothed_signal_list[:, i ] = smoothed_signal
+            y_new_list[:, i ] = y_new.copy()
+            
+        return decter_x_list, smoothed_signal_list, y_new_list, real_detector_cm_aftermean, y_all#, x_rawlist, y_rawlist#
+
+    def linear_edge_filling(self, y_original, x_original, rty):
+        # Calculate slopes and intercepts using the mean of adjacent edge elements
+        leftslope = ((y_original[0] + y_original[1]) / 2 - (y_original[1] + y_original[2]) / 2) / \
+            ((x_original[0] + x_original[1]) / 2 - (x_original[1] + x_original[2]) / 2)
+        
+        rightslope = ((y_original[-1] + y_original[-2]) / 2 - (y_original[-2] + y_original[-3]) / 2) / \
+            ((x_original[-1] + x_original[-2]) / 2 - (x_original[-2] + x_original[-3]) / 2)
+        
+        leftslope[leftslope>=0] = -leftslope[leftslope>=0]
+        rightslope[rightslope<=0] = -rightslope[rightslope<=0]
+        left_intercept = (y_original[0] + y_original[1]) / 2 - leftslope * (x_original[0] + x_original[1]) / 2
+        right_intercept = (y_original[-1] + y_original[-2]) / 2 - rightslope * (x_original[-1] + x_original[-2]) / 2
+        
+        left_c  = y_original[0]-leftslope*x_original[0]
+        right_c = y_original[-1]-rightslope*x_original[-1]
+        
+        
+        left_x_mid = np.mean([rty , x_original[0]])
+        right_x_mid = np.mean([-rty , x_original[-1]])
+        left_xinter = rty
+        righ_xinter = -rty
+        
+        left_y_mid = left_x_mid*leftslope+left_c
+        right_y_mid = right_x_mid*rightslope+right_c
+        left_yinter = left_xinter*leftslope+left_c
+        righ_yinter = righ_xinter*rightslope+right_c
+        
+        
+        y_padded = np.concatenate([
+            np.zeros((1, y_original.shape[1])),  # Top padding
+            left_y_mid.reshape(1, y_original.shape[1]),  # Left padding
+            y_original,  # Original data
+            right_y_mid.reshape(1, y_original.shape[1]),  # Right padding
+            np.zeros((1, y_original.shape[1]))  # Bottom padding
+        ], axis=0)
+        y_padded = y_padded-np.max((y_padded[0,:], y_padded[-1,:]),0)
+        x_original_repeated = np.tile(x_original, (y_original.shape[1], 1)).T  # Transpose to shape (20, 6000)
+        
+        # Concatenate with repeated x_original
+        x_padded = np.concatenate([
+            left_xinter+np.zeros((1, y_original.shape[1])),  # Top padding
+            left_x_mid+np.zeros((1, y_original.shape[1])),  # Left padding
+            x_original_repeated,  # Original data repeated for 6000 columns
+            right_x_mid+np.zeros((1, y_original.shape[1])),  # Right padding
+            righ_xinter+np.zeros((1, y_original.shape[1]))  # Bottom padding
+        ], axis=0)
+        return x_padded, y_padded
+       
+    def m1_gaussian_2D(self, test, X, Y, xin_time_s, yin_time_s, x_sym_in_time_s, y_sym_in_time_s):
+        import abel
+        from scipy.signal import find_peaks
+        if test == 0:
+            run_f = yin_time_s.shape[1]
+            offset = 0
+        else:
+            offset = test
+            run_f = 1
+            test  = 1
+                
+        xmesh = len(x_sym_in_time_s)
+        m1Gp = {}
+        num_gaussians_in_time = np.zeros(run_f)
+        # Initialize the 2D Gaussian sum
+        gaussian_2d_sum = np.zeros((len(xin_time_s), len(xin_time_s)))  # Example 2D array
+        #gaussian_3d_array = np.stack([gaussian_2d_sum] * run_f, axis=0)
+        gaussian_3d_array = np.zeros((run_f, len(xin_time_s), len(xin_time_s)))
+        m0_3d_array       = np.zeros((run_f, len(xin_time_s), len(xin_time_s)))
+        integrated_signal_in_time = np.zeros((xmesh, run_f))
+        
+        projection_smoothed = y_sym_in_time_s[xmesh//2:, :].T
+        radial_profile= abel.basex.basex_transform(projection_smoothed,
+                                                       direction="inverse", verbose=False)
+            
+        return gaussian_3d_array, m1Gp, num_gaussians_in_time, m0_3d_array, integrated_signal_in_time, radial_profile
+
+
+
+
+    
+    def plasma_analysis_more(self, test, x_padded, y_padded, dnumhr, signal_dig_khz,recon_center,time_coor):
+        from scipy.ndimage import gaussian_filter
+        import abel
+            
+            
+        signal = np.maximum((y_padded), 0)
+        totalsignal= np.sum(signal, axis=0)+1e-20
+        # Compute RMS Radius evolution in time
+        meanloc     = np.sum(signal * x_padded, axis=0) / totalsignal
+        rms_loc     = 2*np.sqrt(np.sum(signal*(x_padded-meanloc)**2, axis=0) / totalsignal)
+            
+        cm_loc = meanloc
+            
+            
+        interp_func = RectBivariateSpline(x_padded[:,0][::-1], np.arange(signal.shape[1]), y_padded[::-1])
+            
+        dnumhr              = dnumhr
+        signal_hr           = interp_func(dnumhr, np.arange(signal.shape[1]))
+        signal_hr            = np.maximum((signal_hr), 0)
+            
+        cm_loc_hr = (np.sum(signal_hr*dnumhr.reshape(dnumhr.shape[0],1),0)/np.sum(signal_hr,0))
+            
+            
+        if test == 0:
+            run_f = signal_hr.shape[1]
+        else:
+            offset = test
+            run_f = 1
+            test  = 1
+                
+                
+        asy_axuvData_cal_hr_smooth = np.zeros([len(dnumhr), run_f])
+        sym_axuvData_cal_hr_smooth = np.zeros([len(dnumhr), run_f])
+        dnumhr_shift               = np.zeros([len(dnumhr), run_f])
+                
+        peak_element = (np.argmax(signal_hr, 0)).astype(int)
+        cm_element   = (cm_loc_hr//(dnumhr[1]-dnumhr[0])).astype(int)+dnumhr.shape[0]//2
+                
+        if recon_center == 0:
+            shift_element = np.zeros(cm_element.shape[0])+dnumhr.shape[0]//2
+        elif  recon_center == 1:
+            shift_element = peak_element
+        else:
+            shift_element = cm_element
+            
+        backshift_for_x = (shift_element).astype(int)
+                    
+        
+        for look in range(run_f):
+            mid_ind = np.mod(np.linspace(shift_element[look]- (dnumhr.shape[0])//2,
+                                         len(dnumhr)+shift_element[look]-1- (dnumhr.shape[0])//2,
+                                         len(dnumhr)).astype(int), dnumhr.shape[0])
+                        
+                        
+            asy_axuvData_cal_hr = np.maximum((-signal_hr[mid_ind, look][::-1]
+                                                          +signal_hr[mid_ind, look]),0)
+            sym_axuvData_cal_hr = signal_hr[mid_ind, look] - np.maximum((asy_axuvData_cal_hr), 0)
+                        
+            asy_axuvData_cal_hr_smooth[:, look] = gaussian_filter(asy_axuvData_cal_hr, sigma=2)
+            sym_axuvData_cal_hr_smooth[:, look] = gaussian_filter(sym_axuvData_cal_hr, sigma=2)
+            dnumhr_shift[:, look]               = dnumhr+dnumhr[backshift_for_x[look]]
+                        
+        max_ind         =   np.argmax(asy_axuvData_cal_hr_smooth, 0)
+        asy_cm_loc_hr      =  (np.sum(asy_axuvData_cal_hr_smooth*dnumhr.reshape(dnumhr.shape[0],1),0)/np.sum(asy_axuvData_cal_hr_smooth,0))
+                        
+        max_ind_Sym     = np.argmax(sym_axuvData_cal_hr_smooth, 0)
+        rhot_c1   =  dnumhr_shift[max_ind, np.arange(len(max_ind))]
+                        
+                        
+                        
+        
+        whamc = dnumhr[backshift_for_x]
+                        
+        if recon_center == 2:
+            c1n1         = np.sum(asy_axuvData_cal_hr_smooth,0)/np.sum(signal_hr,0)
+            c1n1_cm1     = c1n1
+        else:
+            c1n1         = abs((cm_loc_hr-whamc)/(rhot_c1-whamc))
+            c1n1_cm1     = abs((cm_loc_hr-whamc)/(asy_cm_loc_hr-whamc))
+                            
+                            
+        determinants = []
+        
+        #cm_loc = np.nan_to_num(cm_loc, nan=0)
+        #rms_loc = np.nan_to_num(rms_loc, nan=0)
+        #c1n1_cm1 = np.nan_to_num(c1n1_cm1, nan=0)
+        
+        data = {
+            'CM': cm_loc, #cm_coor cm
+            'R' : rms_loc #rms_coor cm
+        }
+        df = pd.DataFrame(data)
+                            
+        maxdev = 0
+        realmaxdev = 0
+        detv_list = {}
+        for jjh in range(len(signal_dig_khz)):
+            
+            window_size = 1/signal_dig_khz[jjh]*1000
+            wt = int((window_size))
+            rolling_cov_matrix = df.rolling(window=wt).cov()
+            determinants = []
+                                
+            for i in range(wt - 1, len(df)):
+                # Extract the rolling covariance matrix at each index
+                cov_matrix = rolling_cov_matrix.loc[i].values.reshape(len(df.columns), -1)
+                # Calculate the determinant if the matrix is square
+                det = np.linalg.det(cov_matrix)
+                determinants.append(np.sqrt(det))
+                #determinants.append(np.sqrt(cov_matrix[0,0]))
+                #print(f"Determinant of rolling covariance matrix at index {i}: {det*1e6:.4f}")
+                                    
+            detv = np.array(determinants)
+            detv_list[f"{jjh}_dev"] = detv
+            detv_list[f"{jjh}_t"]   = time_coor[np.arange(wt - 1, len(df))-wt//2]
+                                    
+            maxdev = max(detv)
+            realmaxdev = max([realmaxdev, maxdev])
+                                    
+        if test == 1:
+            plt.plot(x_original, y_original[:, look])
+            #plt.plot(dnumhr, signal_hr[mid_ind, look])
+                                        
+            plt.plot(dnumhr_shift[:, look], asy_axuvData_cal_hr_smooth[:, look])
+            plt.plot(dnumhr_shift[:, look], sym_axuvData_cal_hr_smooth[:, look])
+            plt.plot(dnumhr_shift[:, look], sym_axuvData_cal_hr_smooth[:, look]+
+                     asy_axuvData_cal_hr_smooth[:, look],linestyle='--')
+            plt.xlim([-24, 24])
+            plt.show()
+        
+        return  cm_loc, rms_loc, c1n1_cm1, detv_list, cm_loc_hr,signal_hr, dnumhr_shift, sym_axuvData_cal_hr_smooth, asy_axuvData_cal_hr_smooth
+                                    
+#self.RMS_Plasma = 2*self.AssumR_Plasma*self.rmsphi

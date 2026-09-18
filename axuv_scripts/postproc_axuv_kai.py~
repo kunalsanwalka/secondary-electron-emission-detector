@@ -1,0 +1,319 @@
+#
+# This processes the axuv data and pushes it to MDSplus
+
+import numpy as np
+#import scipy as sc
+import MDSplus as mds
+import os
+import shutil
+import logging
+import argparse
+import time
+import abel
+from scipy.signal import savgol_filter as savgol
+import traceback
+
+# Path for the MDSplus model trees
+#MDSplus_path = '/home/dtacqAdmin/mdsplus_trees/'
+
+## Directory where all the data files get stored
+#pulseDirectory = '/home/dtacqAdmin/data/'
+#pulseDirectory = '/mnt/n/data2/'
+
+treeName = 'axuv'
+
+# axuv digitizer 639, 64 channel, 1 MS/s 
+#digIP = '192.168.130.164'  # CHECK
+digIP = '192.168.113.164' # 
+digName = 'acq1001_639'
+
+logName = 'postproc_axuv'
+#logDir = '/home/dtacqAdmin/procScripts/logs/'
+logDir = '/home/whamdata/post_processing/logs/'
+logPath = logDir+logName+'.log'
+
+#statusDir = '/home/dtacqAdmin/armScripts/status/'
+#statusPath = statusDir + 'acq1001_639.log'
+
+# Current settings to store in MDSplus
+
+
+######################################################
+
+def runningMean(x,N):
+    return np.convolve(x, np.ones((N,))/N)[(N-1):]
+
+######################################################
+
+def initialize_logger(path):
+
+# Create a logger for this file.
+    logger = logging.getLogger(logName)
+    logger.setLevel(logging.DEBUG)
+# Capture other warnings
+    logging.captureWarnings(True)
+# Create a file handler to write to.
+    #file_handler = logging.FileHandler("/home/dtacqAdmin/procScripts/logs/postproc_shinethru.log", "w")
+    file_handler = logging.FileHandler(path, "w")
+
+    file_handler.setLevel(logging.DEBUG)
+# Create a formatter to make the logging look nice.
+    formatter = logging.Formatter('%(asctime)s, %(name)s - %(levelname)s: %(message)s')
+    file_handler.setFormatter(formatter)
+# Add the file handler to the logger.
+    logger.addHandler(file_handler)
+
+    logger.info('Logger file created')
+
+    return logger
+
+######################################################
+
+def parseArgs(logger):
+#    """
+#    This function gets the shot number if specified and then runs the post processing script.
+#    """
+    
+    logger.info('parseArgs')
+
+    # Create a parser object that allows us to pass multiple arguments of various types into run_single_shot with 1 object
+    parser = argparse.ArgumentParser(description='post processing script arguments')
+    # Shot number
+    parser.add_argument('-s','--shotnum', metavar = 'shot number', type=int, default=0,
+                        help = 'Shot number to post-process. If not specified, latest shot is post-processed by getting shot number from andrew')
+
+    parser.add_argument('-p','--plot', metavar = 'plot boolean', type=int, default=0,
+            help = 'If 1, will show plots. Default is 0')
+    parser.add_argument('-w','--write', metavar = 'write boolean', type=int, default=1,
+            help = 'If 1, will save data.. Default is 1')
+
+    try:
+        args = parser.parse_args()
+        logger.info('parser.parse_args succeeded?')
+    except Exception as e:
+        logger.error(e)
+
+    logger.info(vars(args))
+        
+    logger.info('Arguments parsed.')
+    
+    return args
+
+######################################################
+
+def check_status(status_path,logger):
+    # This function checks the status of the mdsplus data files and waits until they've been written to proceed
+    for line in open(status_path):
+        pass
+    status = line.strip()
+
+    idx = 0
+    while status != 'IDLE':
+        time.sleep(1); idx += 1
+        logger.info('dtacq status = '+status)
+
+        if idx >= 30:
+            logger.info('Waited {:1.0f} seconds. Terminating script.'.format(idx))
+            exit()
+            
+######################################################
+
+def run_post_process(logger,args):
+
+    logger.info('run_post_process')
+
+    if args.plot:
+        import matplotlib.pyplot as plt
+
+
+    shotnum = args.shotnum
+    print('shotnum = ',+shotnum)
+    logger.info('shotnum = {}'.format(shotnum))
+
+    if shotnum == 0:
+        logger.info('shotnum = 0. Connecting to andrew mdsplus to get current shot')
+        # Open a connection to andrew
+        MDS_SERVER = 'andrew.psl.wisc.edu'
+        conn = mds.connection.Connection(MDS_SERVER)
+        # Open the WHAM tree, get the current shot number and close the tree
+        conn.openTree('wham', 0)
+        shotnum = int(conn.get('$shot'))
+        conn.closeTree('wham', 0)
+
+    shotString = str(shotnum)
+    year = shotString[:2] + '/'
+    month = shotString[2:4] + '/'
+    day = shotString[4:6] + '/'
+
+    ### Open the raw data tree
+    logger.info('Getting raw tree data')
+    rawTree = mds.Tree('acq1001_639', shotnum)
+    # Processed data tree 
+    procTree = mds.Tree('axuv',shotnum,'edit')
+
+    nodename_list = ['DIODEARRAY1','DIODEARRAY2','DIODEARRAY3']
+    dtacqToDiodeMap = {} 
+    dtacqToDiodeMap = {
+        # D1 mapping (1_CH_xx)
+        'CH_42': '1_CH_20', 'CH_41': '1_CH_19', 'CH_40': '1_CH_18', 'CH_39': '1_CH_17', 'CH_38': '1_CH_16',
+        'CH_37': '1_CH_15', 'CH_36': '1_CH_14', 'CH_35': '1_CH_13', 'CH_34': '1_CH_12', 'CH_33': '1_CH_11',
+        'CH_21': '1_CH_10', 'CH_22': '1_CH_09', 'CH_23': '1_CH_08', 'CH_24': '1_CH_07', 'CH_25': '1_CH_06',
+        'CH_26': '1_CH_05', 'CH_27': '1_CH_04', 'CH_28': '1_CH_03', 'CH_29': '1_CH_02', 'CH_30': '1_CH_01',
+
+        # D2 mapping (2_CH_xx)
+        'CH_20': '2_CH_20', 'CH_19': '2_CH_19', 'CH_18': '2_CH_18', 'CH_17': '2_CH_17', 'CH_16': '2_CH_16',
+        'CH_15': '2_CH_15', 'CH_14': '2_CH_14', 'CH_13': '2_CH_13', 'CH_12': '2_CH_12', 'CH_11': '2_CH_11',
+        'CH_10': '2_CH_10', 'CH_09': '2_CH_09', 'CH_08': '2_CH_08', 'CH_07': '2_CH_07', 'CH_06': '2_CH_06',
+        'CH_05': '2_CH_05', 'CH_04': '2_CH_04', 'CH_03': '2_CH_03', 'CH_02': '2_CH_02', 'CH_01': '2_CH_01',
+
+        # D3 mapping (3_CH_xx)
+        'CH_43': '3_CH_20', 'CH_44': '3_CH_19', 'CH_45': '3_CH_18', 'CH_46': '3_CH_17', 'CH_47': '3_CH_16',
+        'CH_48': '3_CH_15', 'CH_49': '3_CH_14', 'CH_50': '3_CH_13', 'CH_51': '3_CH_12', 'CH_52': '3_CH_11',
+        'CH_53': '3_CH_10', 'CH_54': '3_CH_09', 'CH_55': '3_CH_08', 'CH_56': '3_CH_07', 'CH_57': '3_CH_06',
+        'CH_58': '3_CH_05', 'CH_59': '3_CH_04', 'CH_60': '3_CH_03', 'CH_61': '3_CH_02', 'CH_62': '3_CH_01',
+    }
+
+    R_array_s1 = [
+        219.1, 219.2, 219.2, 218.8, 219.4,
+        219.1, 219.2, 219.0, 219.6, 219.3,
+        219.0, 218.8, 219.2, 220.0, 218.9,
+        220.4, 220.9, 220.8, 220.6, 220.8
+        ]
+    R_array_s2 = [
+        276.9, 290, 282, 257.2, 279.4,
+        282, 284, 278.5, 289, 269.5,
+        269.7, 275.6, 264, 274.5, 281,
+        268.5, 272.3, 290, 296, 278.4
+        ]
+    R_array_s3 = [
+        269.5, 283, 278.3, 271.9, 268.8,
+        274, 296, 282, 298, 275.2,
+        276.2, 282, 293, 277.1, 284,
+        294, 280, 282.4, 267.5, 298
+    ]
+
+    R_array = np.array([R_array_s1, R_array_s2, R_array_s3])  # shape: (3, 20)
+
+    diodeToDtacqMap  = {v : k for k, v in dtacqToDiodeMap.items()} # invert this mapping
+
+
+    # Current configuration values 
+    Rwall = 0.362 
+    Rflange = 15.94*0.0254
+#    Rflange - 0.047 # Radial distance in meters
+    Phi = -120.*np.pi/180 # rad, phi location of slit 
+    D = 0.037 # distance between slot and diode face
+# DE 24/08/15 I think these values are more accurate. They agree better with visual inspection inside the chamber. Measure these upon removal!!
+    Rslit = 0.380 # From solidwork, distance from machine axis to slit
+    Zslit = 0.000 # axial location of slit
+    D = 0.025 # From solidworks, Distance between slit and diode face. 
+    d = 0.00095 # distance between diode centers
+    ds = d/2 + d*np.arange(-10,10); #print('ds = ',ds) # Array of distances between each diode center and the slit-axis line. 
+    hypotenii = np.sqrt(D**2 + ds**2) # 
+    phis = np.arctan2(ds,D) # Difference between Phi and each diode line of sight
+    # On 24/09/14, DE installed the flanges backwards. Now the diodes are pointing in the opposite way as before. To maintain consistency, flip. FIX this on the next vent. 
+    if shotnum>240914000: phis = np.flip(phis)
+
+    Rplasm = 0.16 # port this number from MDSplus for future analysis scripts
+
+    # slit location
+    XYslit = np.array([Rslit*np.cos(Phi),Rslit*np.sin(Phi)])
+    # individual diode locations
+    XYs = np.array([Rslit*np.cos(Phi)+hypotenii*np.cos(Phi+phis),Rslit*np.sin(Phi)+hypotenii*np.sin(Phi+phis)])
+    # Phis, individual diode locations in RPhiZ cylindrical coordinates
+    Phis = np.arctan2(XYs[1,:],XYs[0,:])
+    # Radial location of individual diodes
+    Rs = np.sqrt(XYs[0,:]**2 + XYs[1,:]**2) 
+    # Axial location of individual diodes
+    Zs = np.zeros_like(Phis)
+
+    # New slopes of each chord
+    ms = (XYslit[1] - XYs[1,:]) / (XYslit[0] - XYs[0,:])
+    bs = np.zeros_like(ms) # impact parameters
+    # Plot all chords
+    for idx in range(len(ms)):
+               # Find impact parameters b
+        rs = np.sqrt((XYslit[0]+np.linspace(0,1,1001)*np.cos(np.arctan2(ms[idx],1)))**2 + (XYslit[1]+np.linspace(0,1,1001)*np.sin(np.arctan2(ms[idx],1)))**2)
+        bs[idx] = np.min(rs)
+    bs *= np.sign(ds) 
+
+
+   
+    # Load parameters from MDSplus
+    nsamp = rawTree.getNode('numsamples').getData().data()
+
+
+    # Create time array from dim_of
+    time = rawTree.getNode('CH_01').getData().dim_of().data()
+
+ 
+    freq = rawTree.getNode('frequency').getData().data()
+    trig_time = rawTree.getNode('trig_time').getData().data()
+    delay = rawTree.getNode('delay').getData().data()
+    dec = rawTree.getNode('decimation').getData().data()
+    
+    logger.info('freq = {:1.0f}. delay = {:1.1f}. trig_time = {:1.0f}. dec = {:1.0f}. nsamples = {:1.0f}'.format(freq,delay,trig_time+delay,dec,nsamp))
+
+    # Time basis for signals
+    # $1 --> NSAM | $2 --> TIME0 | $3 --> FREQ
+    # This codeblock allows the signals to be displayed w.r.t. time vs. w.r.t. sample number
+    win = "BUILD_WINDOW(0,$1-1,BUILD_WITH_UNITS($2,'S'))"
+    axis = "BUILD_WITH_UNITS(BUILD_RANGE($2,$2+(1/d_float($3))*($1-1),1/d_float($3)),'S')"
+    tbase = "BUILD_DIM("+win+","+axis+")"
+
+    # Put base parameters
+    
+    for n_idx, n in enumerate(nodename_list):
+
+        axuv_raw = np.zeros((20,nsamp))
+    # import raw data from MDSplus 
+        for i in range(len(axuv_raw[:,0])):
+            axuv_raw[i,:] = -rawTree.getNode(diodeToDtacqMap['{}_CH_{:02d}'.format(n_idx+1,i+1)]).getData().data()
+    # Crude filter out highest frequency noise
+        #wndw=3 ; ordr=1
+        #axuv_proc = savgol(axuv_raw / R_array.reshape(20,1),wndw,ordr,axis=1)
+
+        nodename = n
+        try: 
+            procTree.getNode(nodename+'.PHI_SLIT').putData(Phi)
+            procTree.getNode(nodename+'.D_SLIT_DIOD').putData(mds.Data.compile("BUILD_WITH_UNITS($1,'m')", D))
+            procTree.getNode(nodename+'.R_SLIT').putData(mds.Data.compile("BUILD_WITH_UNITS($1,'m')", Rslit))
+            procTree.getNode(nodename+'.Z_SLIT').putData(mds.Data.compile("BUILD_WITH_UNITS($1,'m')", Zslit))
+        except Exception as e:
+            logger.warning(e)
+
+        for idx in range(20):
+            CH_Name = nodename+'.CH_{:02d}'.format(idx+1)
+            logger.info(CH_Name)
+            try:
+                procTree.getNode(CH_Name+'.PHI').putData(Phis[idx])
+                procTree.getNode(CH_Name+'.R').putData(mds.Data.compile("BUILD_WITH_UNITS($1,'m')",Rs[idx]))
+                procTree.getNode(CH_Name+'.Z').putData(mds.Data.compile("BUILD_WITH_UNITS($1,'m')",Zs[idx]))
+                procTree.getNode(CH_Name+'.RESISTOR').putData(mds.Data.compile("BUILD_WITH_UNITS($1,'Ohm')",R_array[n_idx, idx]))
+                procTree.getNode(CH_Name+'.B_IMPACT').putData(mds.Data.compile("BUILD_WITH_UNITS($1,'m')",bs[idx]))
+                procTree.getNode(CH_Name+'.CURRENT').putData(mds.Data.compile('BUILD_SIGNAL($VALUE,$4,'+tbase+')',
+                                 len(axuv_raw[idx,:]), trig_time+delay, freq/dec, axuv_raw[idx,:]))
+            except Exception as e:
+                logger.warning(e)
+
+    logger.info('Finished putting data')
+
+
+# execute main script
+
+if __name__ == '__main__':
+
+    logger = initialize_logger(logPath)
+
+    args = parseArgs(logger)
+
+    #    check_status(statusPath,logger)
+    #Attempt to run the post process script. If fails, log error and try again (max 3 attempts)
+    for i in range(1):
+        try:
+            run_post_process(logger,args)
+            break
+        except Exception as e:
+            logger.info("Error running script:\n {}".format(traceback.format_exc()))
+            print(traceback.format_exc())
+            time.sleep(1)   #Wait 1s before trying again

@@ -352,16 +352,76 @@ def plot_radial_profiles(timeDelta=0.5e-3, cmap='viridis'):
 
     return
 
+def plot_2d_density_contour(simulationName, timeToPlot, cmap='inferno'):
+    """
+    Plot the 2D (R, Z) plasma density contour of the given simulation at the specified time.
+
+    Parameters
+    ----------
+    simulationName : str
+        The name of the simulation.
+    timeToPlot : float
+        The time at which to plot the 2D density profile. [s]
+        The closest available simulation timestep is used.
+    cmap : str
+        Colormap used for the contour plot.
+        Default is 'inferno'.
+    """
+
+    # All simulations are stored in the same directory
+    simulationDir = simulationScanDir + simulationName + '/'
+
+    # Load the saved data
+    with open(simulationDir + 'density_interp_data.pkl', 'rb') as loadFile:
+        saveData = pickle.load(loadFile)
+
+        solrz = saveData['solrz']
+        solzz = saveData['solzz']
+        times = saveData['times']
+
+        # [Time x r x z]
+        dens = saveData['dens']
+
+    # Drop the CQL3D restart slices and clip the unphysical density spikes
+    keep = find_valid_time_slices(times)
+    times = times[keep]
+    dens = np.clip(dens[keep], a_min=0, a_max=maxIonDensity)
+
+    # Find the index of the closest time in the simulation data
+    timeIdx = np.argmin(np.abs(times - timeToPlot))
+
+    fig = plt.figure(figsize=(12, 8), tight_layout=True)
+    fig.suptitle(simulationName)
+    ax = fig.add_subplot(1, 1, 1)
+
+    levels = np.linspace(0, np.max(dens[timeIdx]), 100)
+
+    pltObj = ax.contourf(solzz, solrz, dens[timeIdx], levels=levels, cmap=cmap)
+
+    cbar = fig.colorbar(pltObj, ax=ax)
+    cbar.set_label(r'n$_i$ [m$^{-3}$]')
+
+    ax.set_xlim(0, 0.8)
+    ax.set_aspect('equal')
+
+    ax.set_xlabel('Z [m]')
+    ax.set_ylabel('R [m]')
+    ax.set_title(f'Time = {times[timeIdx]*1e3:.4g} ms')
+
+    plt.show()
+
+    return
+
 if __name__ == "__main__":
 
-    simName = 'nneut_2e17_gb_2e17_NBI_800kW_ECH_0kW_ionDrrOn'
-
-    # Times to plot (in seconds)
-    timesToPlotSim = np.array([4]) * 1e-3
-    timesToPlotExp = np.array([6]) * 1e-3
-
+    simName = 'nneut_1e18_gb_2e17_NBI_800kW_ECH_0kW_ionDrrOn'
     shotnum = 260426037
 
-    plot_radial_profiles(timeDelta=0.5e-3, cmap='viridis')
+    # Times to plot (in seconds)
+    timesToPlotSim = np.array([0.62]) * 1e-3
+    timesToPlotExp = np.array([10]) * 1e-3
+
+    # plot_radial_profiles(timeDelta=0.5e-3, cmap='viridis')
+    plot_2d_density_contour(simName, timesToPlotSim[0])
     # plot_radial_and_synthetic(simName, shotnum, timesToPlotSim, timesToPlotExp)
     # times, synInf = synthetic_interferometer(simName, makeplot=True)
