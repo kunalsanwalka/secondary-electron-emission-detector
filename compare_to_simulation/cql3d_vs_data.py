@@ -804,6 +804,225 @@ def time_dependent_see_detector(simulationName, detDictList, makeplot=False, tim
             
     return detDictList
 
+def time_dependent_see_detector_extended(simulationName, shotnum, detDictList, diodeArrayNum=1,
+                                         rateKHz=10.0, tanhSteepness=4.0,
+                                         axuvTMin=None, axuvTMax=None, redoAnalysis=False):
+    """
+    Run the synthetic SEE diagnostic on the simulation extended out to the AXUV plasma radius.
+
+    This is the same diagnostic as time_dependent_see_detector(), but run on the density profile
+    built by extend_2d_density_all_times() in extend_cql3d_with_axuv.py, which adds a tanh
+    fall-off from the edge of the CQL3D grid out to the plasma radius measured by AXUV. That
+    extension depends on the experimental time through the AXUV plasma radius, so the signal now
+    depends on both the simulated and the experimental time rather than on the simulated time
+    alone.
+
+    The signals are saved to (and loaded from)-
+    simulationScanDir + f'{simulationName}/synthetic_detector_data_{shotnum}_extension.npz'
+    which is kept separate from the synthetic_detector_data.npz of the unextended simulation.
+
+    Parameters
+    ----------
+    simulationName : str
+        Name of the simulation.
+    shotnum : int
+        Shot number the AXUV plasma radius is taken from.
+    detDictList : list
+        List of dictionaries with the detector parameters.
+    diodeArrayNum : int
+        The diode array the AXUV plasma radius is taken from, i.e. 1 for DIODEARRAY1.
+        Default is 1.
+    rateKHz : float
+        Rate the native AXUV data is averaged down to. [kHz]
+        This sets the experimental timebase of the result.
+        Default is 10.
+    tanhSteepness : float
+        Steepness of the tanh fall-off of the extension.
+        Default is 4.
+    axuvTMin : float
+        Start of the experimental time window the AXUV data is trimmed to. [s]
+        Default is None, which keeps the data from the start of the shot.
+    axuvTMax : float
+        End of the experimental time window the AXUV data is trimmed to. [s]
+        Default is None, which keeps the data to the end of the shot.
+    redoAnalysis : bool
+        Force the signals to be recomputed instead of loading the saved ones.
+        Default is False.
+
+    Returns
+    -------
+    syntheticSignal : np.array
+        3D array [simTime x expTime x detector] of the line-integrated density. [m^-2]
+        The detectors are in the same order as detDictList.
+    simTime : np.array
+        1D array of the simulation times. [s]
+    expTime : np.array
+        1D array of the experimental times of the AXUV plasma radius. [s]
+    """
+
+    # All simulations are stored in the same directory
+    simulationDir = simulationScanDir + simulationName + '/'
+
+    # Kept separate from the unextended synthetic_detector_data.npz
+    savePath = simulationDir + f'synthetic_detector_data_{shotnum}_extension.npz'
+
+    # Load the saved data if it already exists
+    try:
+
+        if redoAnalysis:
+            raise Exception('Forcing redo of the extended synthetic detector data')
+
+        print(f'Trying to load the extended synthetic detector data for {simulationName}')
+
+        dataObj = np.load(savePath)
+
+        syntheticSignal = dataObj['syntheticSignal']
+        simTime = dataObj['simTime']
+        expTime = dataObj['expTime']
+
+        return syntheticSignal, simTime, expTime
+
+    except Exception as e:
+
+        print(e)
+        print('No saved extended synthetic detector data present, generating it.')
+
+    # Imported here rather than at the top of the file because extend_cql3d_with_axuv imports
+    # from this module, so importing it at the top would be a circular import
+    import cql3d_radial_profiles
+    import extend_cql3d_with_axuv as eca
+
+    # Both of those modules keep their own copy of the scan directory, so point them at the
+    # one being used here
+    eca.simulationScanDir = simulationScanDir
+    cql3d_radial_profiles.simulationScanDir = simulationScanDir
+
+    # Everything the extension needs that does not depend on the simulated time. This is what
+    # extend_2d_density_all_times() assembles its density profile out of, and it is used here
+    # directly so that the full [simTime x expTime x R x Z] profile (which runs to hundreds of
+    # MB) does not have to be held in memory just to be line-integrated.
+    # redoAnalysis is passed on so that forcing a redo here also rebuilds the cached
+    # extension, rather than recomputing the signals from a stale one
+    try:
+
+        extData = eca.build_density_extension(simulationName, shotnum, diodeArrayNum,
+                                              rateKHz=rateKHz, tanhSteepness=tanhSteepness,
+                                              tMin=axuvTMin, tMax=axuvTMax,
+                                              redoAnalysis=redoAnalysis)
+
+    except FileNotFoundError as e:
+
+        print(e)
+        print(f'No AXUV data present for shot {shotnum}, generating it.')
+
+        # The AXUV script saves its results to the data directory that
+        # build_density_extension() loads from
+        axuvScriptDir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'axuv_scripts')
+        subprocess.run([sys.executable, 'axuv_data_output.py', '-s', f'{shotnum}'],
+                       cwd=axuvScriptDir, check=True)
+
+        extData = eca.build_density_extension(simulationName, shotnum, diodeArrayNum,
+                                              rateKHz=rateKHz, tanhSteepness=tanhSteepness,
+                                              tMin=axuvTMin, tMax=axuvTMax,
+                                              redoAnalysis=redoAnalysis)
+
+    simTime = extData['times']
+    expTime = extData['axuvTimes']
+    densSim = extData['densSim']
+    solrz = extData['solrz']
+    solzz = extData['solzz']
+    shapeExt = extData['shapeExt']
+    rExtMapped = extData['rExtMapped']
+    zGrid = extData['zGrid']
+
+    numRSim = solrz.shape[0]
+    numRExt = rExtMapped.shape[0]
+
+    # The mesh the extended profile lives on, i.e. the simulation grid with the flux surfaces
+    # of the extension stacked onto the outside of it
+    solrzExt = np.concatenate([solrz, rExtMapped], axis=0)
+    solzzExt = np.concatenate([solzz, np.tile(zGrid, (numRExt, 1))], axis=0)
+
+    # The line integral and the interpolation onto the lines of sight are both linear in the
+    # density at the mesh points, and the mesh is the same at every pair of times. The extended
+    # profile is the simulated density (0 on the extension surfaces) plus the extension (0 on
+    # the simulated surfaces), and the extension is the same shape at every simulated time
+    # scaled by the density at the edge of the simulation grid. The signal is therefore
+    #
+    #   signal[simTime, expTime] = simSignal[simTime] + edgeDensity[simTime]*extSignal[expTime]
+    #
+    # which needs one line integration per simulated time and one per experimental time rather
+    # than one per pair of them.
+
+    # Signal of the simulated density alone
+    simSignal = np.zeros(shape=(len(simTime), len(detDictList)))
+    densField = np.zeros(solrzExt.shape)
+    for i in range(len(simTime)):
+
+        if i % 50 == 0:
+            print(f'Line integrating simulated timestep {i+1} of {len(simTime)}')
+
+        densField[:numRSim] = densSim[i]
+
+        interpFunc = generate_single_interpolation(densField, solrzExt, solzzExt)
+        simSignal[i] = synthetic_see_detector(detDictList, interpFunc)
+
+    # Signal of the extension alone, with an edge density of 1. The density is constant along
+    # each flux surface of the extension, so the shape is just repeated along z.
+    extSignal = np.zeros(shape=(len(expTime), len(detDictList)))
+    densField = np.zeros(solrzExt.shape)
+    for i in range(len(expTime)):
+
+        if i % 50 == 0:
+            print(f'Line integrating experimental timestep {i+1} of {len(expTime)}')
+
+        densField[numRSim:] = shapeExt[i][:, np.newaxis]
+
+        interpFunc = generate_single_interpolation(densField, solrzExt, solzzExt)
+        extSignal[i] = synthetic_see_detector(detDictList, interpFunc)
+
+    # Midplane density at the edge of the simulation grid, which the extension is scaled by
+    edgeDensity = densSim[:, -1, 0]
+
+    # [simTime x expTime x detector]
+    syntheticSignal = (simSignal[:, np.newaxis, :]
+                       + edgeDensity[:, np.newaxis, np.newaxis] * extSignal[np.newaxis, :, :])
+
+    #### Save the data
+
+    np.savez(savePath,
+             syntheticSignal = syntheticSignal,
+             simTime = simTime,
+             expTime = expTime)
+
+    print(f'Saved the extended synthetic detector data to- \n {savePath}')
+
+    return syntheticSignal, simTime, expTime
+
+def comparison_filename(simulationName, shotnum, metricName):
+    """
+    Path the comparison between a shot and a simulation is saved to.
+
+    Parameters
+    ----------
+    simulationName : str
+        Name of the simulation.
+    shotnum : int
+        Shot number the simulation was compared against.
+    metricName : str
+        Name of the comparison metric, from cm.metric_name().
+
+    Returns
+    -------
+    filename : str
+        Path of the saved comparison.
+    """
+
+    # The '_extension' suffix keeps these separate from the comparisons made against the
+    # unextended simulation, which are on a different experimental timebase
+    return (simulationScanDir + simulationName
+            + f'/shot_comparison/{shotnum}_{metricName}_extension.npz')
+
 def _branch_interpolate(srcRadii, srcDens, srcSigma, targetRadii, radiusTol=0.0):
     """
     Linearly interpolate one branch (upper or lower) of the detector array onto a set of target radii.
@@ -1229,9 +1448,15 @@ def load_experimental_data(shotnum, makeplot=False, symmetrize=True, nInnerSkip=
 
     return detDictList
 
-def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normalized_mean_abs_error, redoAnalysis=False, makeplot=False, saveplot=False, tExpStart=None, tExpStop=None):
+def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normalized_mean_abs_error, redoAnalysis=False, makeplot=False, saveplot=False, tExpStart=None, tExpStop=None,
+                                      diodeArrayNum=1, axuvTMin=None, axuvTMax=None, redoSynthetic=False):
     """
     Compare the plasma density profiles between the CQL3D + KN1D simulation and the experimental result
+
+    The simulation is extended out to the plasma radius measured by AXUV before the synthetic
+    diagnostic is run on it (see time_dependent_see_detector_extended()). That extension is only
+    defined where AXUV measured a radius, so the comparison is made on the AXUV timebase and the
+    experimental data is interpolated onto it.
 
     Paramters
     ---------
@@ -1243,7 +1468,9 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
         Comparison metric from comparison_metrics.py.
         Default is cm.normalized_mean_abs_error.
     redoAnalysis : bool
-        Force redo of the analysis even if there is saved data.
+        Force redo of the comparison even if there is saved data.
+        This does not redo the synthetic diagnostic, which is the expensive part and does not
+        depend on the metric, so changing metrics does not pay for it again.
         Default is False.
     makeplot : bool
         Plot the comparison.
@@ -1257,6 +1484,21 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
     tExpStop : float
         Stop time of the experimental data for plotting. [s]
         Default is None.
+    diodeArrayNum : int
+        The diode array the AXUV plasma radius of the extension is taken from, i.e. 1 for DIODEARRAY1.
+        Default is 1.
+    axuvTMin : float
+        Start of the experimental time window the AXUV data is trimmed to. [s]
+        This sets the start of the experimental timebase of the comparison.
+        Default is None, which keeps the data from the start of the shot.
+    axuvTMax : float
+        End of the experimental time window the AXUV data is trimmed to. [s]
+        This sets the end of the experimental timebase of the comparison.
+        Default is None, which keeps the data to the end of the shot.
+    redoSynthetic : bool
+        Force the extended synthetic diagnostic to be recomputed as well. Use this when the
+        extension itself changes, e.g. the AXUV data or the shape of the fall-off.
+        Default is False.
 
     Returns
     -------
@@ -1266,7 +1508,7 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
     simTimeArr : np.array
         Corresponding simulation time. [s]
     expTimeArr : np.array
-        Corresponding experimental time. [s]
+        Corresponding experimental time, which is the AXUV timebase. [s]
     """
 
     # All simulations are stored in the same directory
@@ -1283,7 +1525,7 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
         print(f'Trying to load the {metricName} comparison between shot {shotnum} and simulation {simulationName}')
 
         # Open the comparison file for the given shot
-        filename = simulationDir + f'shot_comparison/{shotnum}_{metricName}.npz'
+        filename = comparison_filename(simulationName, shotnum, metricName)
 
         dataObj = np.load(filename)
 
@@ -1299,8 +1541,15 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
         # Load the experimental data
         detDictList = load_experimental_data(shotnum)
 
-        # Load the simulation result
-        detDictList = time_dependent_see_detector(simulationName, detDictList)
+        # Load the simulation result, extended out to the AXUV plasma radius. The extension
+        # changes with the experimental time, so the synthetic signal does too.
+        # [simTime x expTime x detector]
+        syntheticSignal, simTimeArr, axuvTimeArr = time_dependent_see_detector_extended(
+            simulationName, shotnum, detDictList,
+            diodeArrayNum = diodeArrayNum,
+            axuvTMin = axuvTMin,
+            axuvTMax = axuvTMax,
+            redoAnalysis = redoSynthetic)
 
         # Detector impact parameters [m]
         impactParams = np.zeros(len(detDictList))
@@ -1328,19 +1577,16 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
             else:
                 dataPresent.append(False)
 
-        # Get the final time for each detector
-        finalTime = 1e5
-        shortestTimeIdx = 0
-        for i in range(len(expTimeArr)):
-            
-            currFinalTime = expTimeArr[i].max()
-            
-            if finalTime > currFinalTime:
-                finalTime = currFinalTime
-                shortestTimeIdx = i
+        # The extension is only defined where AXUV measured a plasma radius, so the AXUV
+        # timebase is the common time array the experimental data is put onto
+        expTimeArrNew = axuvTimeArr
 
-        # Common time array for the experimental data
-        expTimeArrNew = expTimeArr[shortestTimeIdx]
+        # np.interp would silently flat-line a detector that does not cover the whole window
+        for i in range(len(expTimeArr)):
+
+            if expTimeArr[i].min() > expTimeArrNew.min() or expTimeArr[i].max() < expTimeArrNew.max():
+                print(f'Detector {i} does not cover the whole AXUV time window, its data is '
+                      'held constant outside the range it does cover')
 
         # Put all the experimental data on the same timebase
         expDataArrNew = []
@@ -1355,13 +1601,12 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
         expDataArr = np.array(expDataArrNew)
         expDataSigmaArr = np.array(expDataSigmaArrNew)
 
-        #### Put the simulation data into a 2D numpy array
-        simTimeArr = detDictList[0]['simulated_signal_time']
-        
-        simDataArr = np.zeros(shape=(len(detDictList), len(simTimeArr)))
-        for i in range(len(detDictList)):
+        #### Put the simulation data into a 3D numpy array
 
-            simDataArr[i] = detDictList[i]['simulated_signal']
+        # The detector axis is moved to the front so that it lines up with the experimental
+        # data and with the detector filtering below
+        # [detector x simTime x expTime]
+        simDataArr = np.transpose(syntheticSignal, (2, 0, 1))
 
         # Remove the simulation data from the non-functioning detector
         simDataArr = simDataArr[dataPresent]
@@ -1385,10 +1630,11 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
 
         # Compare every simulation time against every experimental time in one call.
         # The metrics reduce over the first (detector) axis and broadcast over the rest,
-        # so the result is [simTime x expTime]
+        # so the result is [simTime x expTime]. The simulated data already has an experimental
+        # time axis because of the extension, so it does not need one adding to it.
         comparisonArr = metric(expDataArr = expDataArr[:, np.newaxis, :],
                                expDataSigmaArr = expDataSigmaArr[:, np.newaxis, :],
-                               simDataArr = simDataArr[:, :, np.newaxis],
+                               simDataArr = simDataArr,
                                impactParams = impactParams,
                                expTime = expTimeArr[np.newaxis, :],
                                simTime = simTimeArr[:, np.newaxis])
@@ -1396,11 +1642,10 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
         #### Save the data
 
         # Make the directory if it does not exist
-        filename = simulationDir + 'shot_comparison'
-        os.makedirs(filename, exist_ok=True)
+        os.makedirs(simulationDir + 'shot_comparison', exist_ok=True)
 
         # Save the data
-        filename = simulationDir + f'shot_comparison/{shotnum}_{metricName}.npz'
+        filename = comparison_filename(simulationName, shotnum, metricName)
 
         np.savez(filename,
                  comparisonArr = comparisonArr,
@@ -1443,7 +1688,7 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
 
         ax.set_aspect('equal')
 
-        ax.set_title(f'{shotnum} vs {simulationName}\n{metricName}')
+        ax.set_title(f'{shotnum} vs {simulationName}\nAXUV extension, {metricName}')
 
         cbar = fig.colorbar(pltObj)
         cbar.locator = ticker.LogLocator(base=10.0, numticks=10)
@@ -1456,7 +1701,7 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
             saveDir = simulationDir + 'plots'
             os.makedirs(saveDir, exist_ok=True)
 
-            plt.savefig(saveDir+f'/{shotnum}_vs_{simulationName}_{metricName}.png', dpi=300)
+            plt.savefig(saveDir+f'/{shotnum}_vs_{simulationName}_{metricName}_extension.png', dpi=300)
 
         plt.show()
 
@@ -1536,7 +1781,7 @@ def plot_simulation_scan_panel(shotnum, metric=cm.normalized_mean_abs_error, sim
     colorbar so that they can be compared directly.
 
     This function only reads the pre-computed comparison data stored in
-    simulationScanDir + '{simulationName}/shot_comparison/{shotnum}_{metricName}.npz'.
+    simulationScanDir + '{simulationName}/shot_comparison/{shotnum}_{metricName}_extension.npz'.
 
     Parameters
     ----------
@@ -1594,7 +1839,7 @@ def plot_simulation_scan_panel(shotnum, metric=cm.normalized_mean_abs_error, sim
             print(f'Could not parse the neutral densities from {simulationName}. Skipping it.')
             continue
 
-        filename = simulationScanDir + simulationName + f'/shot_comparison/{shotnum}_{metricName}.npz'
+        filename = comparison_filename(simulationName, shotnum, metricName)
 
         if not os.path.isfile(filename):
             print(f'No comparison data for {simulationName}. Skipping it.')
@@ -1727,14 +1972,17 @@ def plot_simulation_scan_panel(shotnum, metric=cm.normalized_mean_abs_error, sim
             saveDir = simulationScanDir + 'plots'
             os.makedirs(saveDir, exist_ok=True)
 
-            print(f'Saving the panel plot to {saveDir}/{shotnum}_scan_panel_{metricName}.png')
-            plt.savefig(saveDir + f'/{shotnum}_scan_panel_{metricName}.png', dpi=300)
+            # The '_extension' suffix keeps this separate from the panel plot of the
+            # unextended simulations
+            print(f'Saving the panel plot to {saveDir}/{shotnum}_scan_panel_{metricName}_extension.png')
+            plt.savefig(saveDir + f'/{shotnum}_scan_panel_{metricName}_extension.png', dpi=300)
 
         plt.show()
 
     return
 
-def compare_all_simulations(shotnum, metricList=None, makeIndividualPlots=True, makePanelPlot=True, redoAnalysis=False):
+def compare_all_simulations(shotnum, metricList=None, makeIndividualPlots=True, makePanelPlot=True, redoAnalysis=False,
+                            diodeArrayNum=1, axuvTMin=None, axuvTMax=None, redoSynthetic=False):
     """
     Compare a given shot against every simulation in the scan directory, using every comparison metric.
 
@@ -1756,6 +2004,19 @@ def compare_all_simulations(shotnum, metricList=None, makeIndividualPlots=True, 
         Use this whenever something upstream of the comparison changes, e.g. the experimental data
         processing or a comparison metric, since the cached files are then stale.
         Default is False.
+    diodeArrayNum : int
+        The diode array the AXUV plasma radius of the extension is taken from, i.e. 1 for DIODEARRAY1.
+        Default is 1.
+    axuvTMin : float
+        Start of the experimental time window the AXUV data is trimmed to. [s]
+        Default is None, which keeps the data from the start of the shot.
+    axuvTMax : float
+        End of the experimental time window the AXUV data is trimmed to. [s]
+        Default is None, which keeps the data to the end of the shot.
+    redoSynthetic : bool
+        Force the extended synthetic diagnostic to be recomputed for every simulation.
+        This is only done for the first metric, as the synthetic data does not depend on it.
+        Default is False.
 
     Returns
     -------
@@ -1769,7 +2030,7 @@ def compare_all_simulations(shotnum, metricList=None, makeIndividualPlots=True, 
     # Find all the simulation names
     simNameList = find_simulation_names()
 
-    for metric in metricList:
+    for metricIdx, metric in enumerate(metricList):
 
         print(f'Using the comparison metric {cm.metric_name(metric)}')
 
@@ -1782,7 +2043,13 @@ def compare_all_simulations(shotnum, metricList=None, makeIndividualPlots=True, 
                                                         metric = metric,
                                                         redoAnalysis = redoAnalysis,
                                                         makeplot = makeIndividualPlots,
-                                                        saveplot = makeIndividualPlots)
+                                                        saveplot = makeIndividualPlots,
+                                                        diodeArrayNum = diodeArrayNum,
+                                                        axuvTMin = axuvTMin,
+                                                        axuvTMax = axuvTMax,
+                                                        # The synthetic data does not depend on
+                                                        # the metric, so it is only redone once
+                                                        redoSynthetic = redoSynthetic and metricIdx == 0)
 
         # Now that all the data is pre-computed, make the panel plot of the scan
         if makePanelPlot:
@@ -1801,9 +2068,10 @@ if __name__ == '__main__':
     simulationName = 'nneut_1e18_gb_1e18_NBI_800kW_ECH_0kW'
     # Shot number
     shotnum = 260426037
+    shotnum = 260709060
 
     # Load the experimental data for a given shot
-    detDictList = load_experimental_data(shotnum, True)
+    # detDictList = load_experimental_data(shotnum, True)
 
     # Load all the interpolation functions
     # interpFuncs, times = generate_times_and_functions(simulationName, makeplot=True, saveplot=True)
@@ -1814,8 +2082,12 @@ if __name__ == '__main__':
     # Generate the data for the time dependent synthetic detector
     # detDictList = time_dependent_see_detector(simulationName, detDictList, True)
 
-    # Compare simulation to experiment
-    # comparisonArr, simTimeArr, expTimeArr = compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=False, makeplot=True, saveplot=True)
+    # Compare simulation to experiment. The AXUV window sets the experimental timebase of the
+    # comparison, as the extension is only defined where AXUV measured a plasma radius.
+    # comparisonArr, simTimeArr, expTimeArr = compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=False, makeplot=True, saveplot=True,
+    #                                                                          axuvTMin=3e-3, axuvTMax=12e-3)
 
     # Compare the experiment to all simulations
-    # compare_all_simulations(shotnum, makeIndividualPlots=False, makePanelPlot=True)
+    compare_all_simulations(shotnum, 
+                            metricList=[cm.normalized_mean_abs_error],
+                            makeIndividualPlots=False, makePanelPlot=True, axuvTMin=3e-3, axuvTMax=12e-3)

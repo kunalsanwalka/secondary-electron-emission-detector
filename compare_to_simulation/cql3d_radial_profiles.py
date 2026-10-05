@@ -7,13 +7,18 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 import os
 import pickle
+import yaml
 
 from cql3d_vs_data import load_detector_dictionary, time_dependent_see_detector, load_experimental_data
+from cql3d_vs_data import time_dependent_see_detector_extended
 from cql3d_vs_data import find_simulation_names, find_valid_time_slices, maxIonDensity
 
 # Global variable to store the simulation scan directory
 global simulationScanDir
 simulationScanDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/withRadialDiff/'
+
+# Location of the Thomson scattering data (mirror_fit input format)
+thomsonDataPath = '/home/sanwalka/mirror_fit/1kev_day/data.yaml'
 
 def exp_dict_to_numpy(detDictList):
 
@@ -81,38 +86,158 @@ def sim_dict_to_numpy(detDictList):
 
     return simTimeArr, simDataArr
 
-def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPlotExp):
+def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPlotExp,
+                              useExtension=False, diodeArrayNum=1, rateKHz=10.0,
+                              tanhSteepness=4.0, axuvTMin=None, axuvTMax=None,
+                              redoAnalysis=False, showPlot=True):
     """
-    This function plots the radial density profile at the midplane and the synthetic diagnostic for the given times.
+    Plot the midplane radial density profile and the synthetic diagnostic for the given times.
+
+    The simulated profile and its synthetic SEE signal are plotted against the measured signal,
+    either as CQL3D solves them or extended out to the plasma radius measured by AXUV (see
+    time_dependent_see_detector_extended() in cql3d_vs_data.py).
+
+    In the extended case the density is 4D- the extension is shaped by the AXUV plasma radius,
+    so both the profile and the signal depend on the experimental time as well as the simulated
+    one. timesToPlotSim[i] and timesToPlotExp[i] are therefore taken as a pair, and curve i is
+    the simulation at timesToPlotSim[i] extended with the plasma radius measured at
+    timesToPlotExp[i], drawn against the experimental signal at timesToPlotExp[i]. The two
+    lists have to be the same length in that case. This is the pairing the unextended plot
+    already implies by drawing simulated curve i and experimental curve i in the same color.
 
     Parameters
     ----------
     simulationName : str
         The name of the simulation.
-    timesToPlot : np.array
-        The times at which to plot the radial profiles. [s]
+    shotnum : int
+        The shot number the experimental data is taken from.
+    timesToPlotSim : np.array
+        The simulation times at which to plot the radial profiles. [s]
+        The closest available simulated timestep is used.
+    timesToPlotExp : np.array
+        The experimental times at which to plot the measured signals. [s]
+        The closest available experimental timestep is used.
+    useExtension : bool
+        Use the simulation extended out to the AXUV plasma radius instead of the simulation as
+        CQL3D solves it.
+        Default is False.
+    diodeArrayNum : int
+        The diode array the AXUV plasma radius of the extension is taken from, i.e. 1 for
+        DIODEARRAY1. Only used when useExtension is True.
+        Default is 1.
+    rateKHz : float
+        Rate the native AXUV data is averaged down to. [kHz]
+        This sets the experimental timebase of the extension.
+        Only used when useExtension is True.
+        Default is 10.
+    tanhSteepness : float
+        Steepness of the tanh fall-off of the extension.
+        Only used when useExtension is True.
+        Default is 4.
+    axuvTMin : float
+        Start of the experimental time window the AXUV data is trimmed to. [s]
+        Only used when useExtension is True.
+        Default is None, which keeps the data from the start of the shot.
+    axuvTMax : float
+        End of the experimental time window the AXUV data is trimmed to. [s]
+        Only used when useExtension is True.
+        Default is None, which keeps the data to the end of the shot.
+    redoAnalysis : bool
+        Force the extended synthetic diagnostic and the extension itself to be recomputed
+        instead of loading the saved ones.
+        Only used when useExtension is True.
+        Default is False.
+    showPlot : bool
+        Show the figure before returning. Set to False to add to the figure afterwards.
+        Default is True.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The figure.
+    ax1 : matplotlib.axes.Axes
+        The radial profile axis.
+    ax2 : matplotlib.axes.Axes
+        The synthetic diagnostic axis.
     """
 
     # All simulations are stored in the same directory
     simulationDir = simulationScanDir + simulationName + '/'
 
-    # Load the saved data
-    with open(simulationDir + 'density_interp_data.pkl', 'rb') as loadFile:
-        saveData = pickle.load(loadFile)
+    # Each extended curve is a pair of times rather than a simulated time alone
+    if useExtension and len(timesToPlotSim) != len(timesToPlotExp):
+        raise ValueError('The extended profile depends on the experimental time as well as the '
+                         'simulated one, so timesToPlotSim and timesToPlotExp have to be the '
+                         f'same length. Got {len(timesToPlotSim)} and {len(timesToPlotExp)}.')
 
-        solrz = saveData['solrz']
-        solzz = saveData['solzz']
-
-        # Time not loaded as it is the same as simTimeArr (checked with np.allclose)
-
-        # [Time x r x z]
-        dens = saveData['dens']
-
-    # Load the synthetic SEE signal
+    # Detectors the synthetic diagnostic is run on
     detDictList = load_detector_dictionary('/home/sanwalka/shinethru/lookup_tables/see_detector_dictionary.pkl')
-    detDictList = time_dependent_see_detector(simulationName, detDictList)
-    # Convert to numpy arrays for easy plotting
-    simTimeArr, simDataArr = sim_dict_to_numpy(detDictList)
+
+    if useExtension:
+
+        # Imported here rather than at the top of the file because extend_cql3d_with_axuv
+        # imports this module, so importing it at the top would be a circular import
+        import extend_cql3d_with_axuv as eca
+
+        # That module keeps its own copy of the scan directory, so point it at the one used here
+        eca.simulationScanDir = simulationScanDir
+
+        # Load the extended synthetic SEE signal, [simTime x expTime x detector]
+        syntheticSignal, simTimeArr, axuvTimeArr = time_dependent_see_detector_extended(
+            simulationName, shotnum, detDictList, diodeArrayNum=diodeArrayNum,
+            rateKHz=rateKHz, tanhSteepness=tanhSteepness, axuvTMin=axuvTMin, axuvTMax=axuvTMax,
+            redoAnalysis=redoAnalysis)
+
+        # [detector x simTime x expTime], so that it is indexed like the unextended
+        # [detector x simTime] below
+        simDataArr = np.transpose(syntheticSignal, (2, 0, 1))
+
+        # The pieces the extended density profile is assembled from. This is the same extension
+        # the signals above were line integrated through, so the two stay consistent. The full
+        # [simTime x expTime x R x Z] profile is not built, as it runs to hundreds of MB and
+        # only the midplane of a handful of timesteps is plotted.
+        extData = eca.build_density_extension(simulationName, shotnum, diodeArrayNum,
+                                              rateKHz=rateKHz, tanhSteepness=tanhSteepness,
+                                              tMin=axuvTMin, tMax=axuvTMax,
+                                              redoAnalysis=redoAnalysis)
+
+        # [simTime x r x z], with the restart slices already dropped and the density clipped
+        dens = extData['densSim']
+
+        # [expTime x rExt], the shape of the extension with an edge density of 1
+        shapeExt = extData['shapeExt']
+
+        # Midplane radii of the simulation grid, followed by those of the extension
+        radialGrid = np.concatenate([extData['solrz'][:, 0], extData['rExtGrid']])
+
+    else:
+
+        # Load the saved data
+        with open(simulationDir + 'density_interp_data.pkl', 'rb') as loadFile:
+            saveData = pickle.load(loadFile)
+
+            solrz = saveData['solrz']
+            times = saveData['times']
+
+            # [Time x r x z]
+            dens = saveData['dens']
+
+        # Drop the CQL3D restart slices and clip the unphysical density spikes. The synthetic
+        # signal below has the restart slices dropped as well, so this is what puts dens and
+        # simTimeArr on the same timebase.
+        keep = find_valid_time_slices(times)
+        dens = np.clip(dens[keep], a_min=0, a_max=maxIonDensity)
+
+        # Load the synthetic SEE signal
+        detDictList = time_dependent_see_detector(simulationName, detDictList)
+        # Convert to numpy arrays for easy plotting
+        simTimeArr, simDataArr = sim_dict_to_numpy(detDictList)
+
+        # Midplane radii of the simulation grid
+        radialGrid = solrz[:, 0]
+
+        # There is no AXUV timebase without the extension
+        axuvTimeArr = None
 
     # Load the experimental data
     detDictList = load_experimental_data(shotnum)
@@ -139,7 +264,9 @@ def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPl
     expDataArr = expDataArr[1:]
     expDataSigmaArr = expDataSigmaArr[1:]
 
-    xLim = 1.1 * np.max(np.abs(impactParams))
+    # The radial grid reaches past the outermost detector, more so with the extension, so both
+    # are taken into account to keep the two panels on the same x axis without clipping either
+    xLim = 1.1 * max(np.max(np.abs(impactParams)), np.max(radialGrid))
 
     # Create a figure for the radial profiles
     fig = plt.figure(figsize=(12, 10), tight_layout=True)
@@ -155,23 +282,38 @@ def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPl
         # Find the index of the closest time in the simulation data
         timeIdx = np.argmin(np.abs(simTimeArr - timesToPlotSim[i]))
 
+        if useExtension:
+
+            # The extension is shaped by the AXUV plasma radius, so the profile and the signal
+            # are both taken at the pair of times (timesToPlotSim[i], timesToPlotExp[i])
+            axuvIdx = np.argmin(np.abs(axuvTimeArr - timesToPlotExp[i]))
+
+            # The extension is its shape scaled by the midplane density at the edge of the
+            # simulation grid, stacked onto the outside of the simulated profile
+            radialProfile = np.concatenate([dens[timeIdx, :, 0],
+                                            dens[timeIdx, -1, 0] * shapeExt[axuvIdx]])
+
+            simSignal = simDataArr[:, timeIdx, axuvIdx]
+
+        else:
+
+            radialProfile = dens[timeIdx, :, 0]
+
+            simSignal = simDataArr[:, timeIdx]
+
         #### Radial profile at the midplane
 
-        # Get the radial profile at the midplane
-        radialProfile = dens[timeIdx, :, 0]
-
-        # Plot the radial profile
-        ax1.plot(solrz[:, 0], radialProfile, 
-                 color=f'C{i}', 
+        ax1.plot(radialGrid, radialProfile,
+                 color=f'C{i}',
                  linewidth=3)
-        ax1.plot(-solrz[:, 0], radialProfile, 
-                 color=f'C{i}', 
+        ax1.plot(-radialGrid, radialProfile,
+                 color=f'C{i}',
                  linewidth=3)
 
         #### Synthetic SEE signal
-        ax2.plot(impactParams, simDataArr[:, timeIdx], 
-                 label=f'(sim) {timesToPlotSim[i]*1e3:.2f}', 
-                 color=f'C{i}', 
+        ax2.plot(impactParams, simSignal,
+                 label=f'Simulation {timesToPlotSim[i]*1e3:.2f}ms',
+                 color=f'C{i}',
                  linewidth=3)
 
     # Plot the experimental data
@@ -181,21 +323,21 @@ def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPl
         timeIdx = np.argmin(np.abs(expTimeArr - timesToPlotExp[i]))
 
         ax2.plot(impactParams, expDataArr[:, timeIdx], 
-                 label=f'(exp) {timesToPlotExp[i]*1e3:.2f}', 
-                 color=f'C{i}', 
+                 color=f'k',
                  linewidth=3, 
                  linestyle='dashed')
 
         ax2.errorbar(impactParams, expDataArr[:, timeIdx], 
                      yerr=expDataSigmaArr[:, timeIdx],
-                     color=f'C{i}',
+                     color=f'k',
                      fmt='o',
                      ms=10,
                      elinewidth=7)
         
         ax2.errorbar(impactParams, expDataArr[:, timeIdx], 
                      yerr=3*expDataSigmaArr[:, timeIdx],
-                     color=f'C{i}',
+                     label=f'SEE Array {timesToPlotExp[i]*1e3:.2f}ms', 
+                     color=f'k',
                      fmt='o',
                      ms=10,
                      elinewidth=3)
@@ -206,7 +348,10 @@ def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPl
     ax1.set_xticks([])
     ax1.set_xlim(-xLim, xLim)
 
-    ax1.set_title(f'{simulationName}')
+    title = f'{simulationName} \n vs. Shot {shotnum}'
+    if useExtension:
+        title += f', AXUV DA{diodeArrayNum} extension'
+    ax1.set_title(title)
     
     ax2.set_ylabel(r'$\int n_i \cdot dl$ [m$^{-2}$]')
     ax2.set_ylim(0, None)
@@ -215,6 +360,99 @@ def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPl
     ax2.set_xlabel('Radius [m]')
 
     ax2.legend(title='Time [ms]')
+
+    if showPlot:
+        plt.show()
+
+    return fig, ax1, ax2
+
+def load_thomson_density(dataPath=thomsonDataPath):
+    """
+    Load the Thomson scattering density profile from a mirror_fit data.yaml file.
+
+    Parameters
+    ----------
+    dataPath : str
+        Path to the data.yaml file.
+        Default is thomsonDataPath.
+
+    Returns
+    -------
+    radius : np.array
+        Radius of each measurement, sorted in ascending order. [m]
+        The file stores R = |x|, so all the radii are positive.
+    dens : np.array
+        Measured electron density. [m^-3]
+    densSigma : np.array
+        1 sigma error on the measured electron density. [m^-3]
+    time : float
+        Time of the measurement. [s]
+    """
+
+    with open(dataPath, 'r') as f:
+        data = yaml.safe_load(f)
+
+    thomson = data['diagnostics']['thomson_density']
+
+    radius = np.array([rz[0] for rz in thomson['RZ']])
+    # Only the first time is used
+    dens = np.array(thomson['measurements'][0], dtype=float)
+    densSigma = np.array(thomson['sigma_measurements'][0], dtype=float)
+    time = float(data['times'][0])
+
+    # Sort based on the radius
+    sortIdx = np.argsort(radius)
+
+    return radius[sortIdx], dens[sortIdx], densSigma[sortIdx], time
+
+def plot_radial_and_synthetic_with_thomson(simulationName, shotnum, timesToPlotSim, timesToPlotExp,
+                                           useExtension=False, diodeArrayNum=1, rateKHz=10.0,
+                                           tanhSteepness=4.0, axuvTMin=None, axuvTMax=None,
+                                           redoAnalysis=False, saveplot=False):
+    """
+    Same plot as plot_radial_and_synthetic(), with the Thomson scattering density profile
+    (loaded from thomsonDataPath) added to the radial profile panel.
+
+    The Thomson data is stored as R = |x|, so it is plotted on the positive radius side only.
+
+    Parameters
+    ----------
+    See plot_radial_and_synthetic(), plus-
+    saveplot : bool
+        Save the plot in /home/sanwalka/shinethru/plots/ as
+        f'{simulationName}_{shotnum}_withThomsonComparison.png'.
+        Default is False.
+    """
+
+    fig, ax1, ax2 = plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPlotExp,
+                                              useExtension=useExtension, diodeArrayNum=diodeArrayNum,
+                                              rateKHz=rateKHz, tanhSteepness=tanhSteepness,
+                                              axuvTMin=axuvTMin, axuvTMax=axuvTMax,
+                                              redoAnalysis=redoAnalysis, showPlot=False)
+
+    # Load the Thomson scattering data
+    tsRadius, tsDens, tsDensSigma, tsTime = load_thomson_density()
+
+    ax1.errorbar(tsRadius, tsDens,
+                 yerr=tsDensSigma,
+                 label=f'Thomson n$_e$, {tsTime*1e3:.2f} ms',
+                 color='black',
+                 fmt='o',
+                 ms=10,
+                 elinewidth=3)
+
+    # The y limits were fixed before the Thomson data was added, so rescale to fit its error bars
+    ax1.set_autoscaley_on(True)
+    ax1.relim()
+    ax1.autoscale_view(scalex=False)
+    ax1.set_ylim(0, None)
+
+    ax1.legend()
+
+    if saveplot:
+        savePath = f'/home/sanwalka/shinethru/plots/{simulationName}_{shotnum}_withThomsonComparison.png'
+        plt.savefig(savePath, dpi=600)
+        print(f'Saved plot to {savePath}')
 
     plt.show()
 
@@ -518,14 +756,19 @@ def plot_2d_density_contour(simulationName, timeToPlot, densCmap='inferno',
 
 if __name__ == "__main__":
 
-    simName = 'nneut_1e18_gb_2e17_NBI_800kW_ECH_0kW_ionDrrOn'
-    shotnum = 260426037
+    simName = 'nneut_3e16_gb_1e18_NBI_800kW_ECH_0kW_ionDrrOn'
+    shotnum = 260709061
 
     # Times to plot (in seconds)
-    timesToPlotSim = np.array([0.62]) * 1e-3
-    timesToPlotExp = np.array([10]) * 1e-3
+    timesToPlotSim = np.array([3]) * 1e-3
+    timesToPlotExp = np.array([4]) * 1e-3
 
     # plot_radial_profiles(timeDelta=0.5e-3, cmap='viridis')
-    plot_2d_density_contour(simName, timesToPlotSim[0])
-    # plot_radial_and_synthetic(simName, shotnum, timesToPlotSim, timesToPlotExp)
+    # plot_2d_density_contour(simName, timesToPlotSim[0])
+    # plot_radial_and_synthetic(simName, shotnum, timesToPlotSim, timesToPlotExp,
+    #                           useExtension=True, diodeArrayNum=1, rateKHz=10.0)
+
+    plot_radial_and_synthetic_with_thomson(simName, shotnum, timesToPlotSim, timesToPlotExp,
+                                           useExtension=True, diodeArrayNum=1, rateKHz=10.0, 
+                                           saveplot=True)
     # times, synInf = synthetic_interferometer(simName, makeplot=True)

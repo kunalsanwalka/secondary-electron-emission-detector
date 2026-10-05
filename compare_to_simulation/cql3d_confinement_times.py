@@ -10,6 +10,9 @@ import matplotlib.pyplot as plt
 
 from kn1dc_parser import generate_filename_list, time_dep_source_rate
 
+# Global variable to store the simulation scan directory
+simulationScanDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/withRadialDiff/'
+
 def flux_tube_vol(filenameListCQL3D):
 
     fluxTubeVol = []
@@ -67,7 +70,7 @@ def taup_cql3d(filenameListCQL3D):
 def density_profile(simName, timeArrIPS, makeplot=False):
 
     # All simulations are stored in the same directory
-    simulationDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/' + simName + '/'
+    simulationDir = simulationScanDir + simName + '/'
 
     # Load the saved data
     with open(simulationDir + 'density_interp_data.pkl', 'rb') as loadFile:
@@ -220,9 +223,9 @@ def radial_taup_profiles(simName, timesToPlotSim, makeplot=False):
 
 if __name__ == '__main__':
 
-    simName = 'nneut_1e18_gb_1e18_NBI_800kW_ECH_0kW'
+    simName = 'nneut_3e16_gb_1e18_NBI_800kW_ECH_0kW_ionDrrOn'
     
     # Times to plot (in seconds)
-    timesToPlotSim = np.array([3.5]) * 1e-3
+    timesToPlotSim = np.array([3]) * 1e-3
 
     radial_taup_profiles(simName, timesToPlotSim, makeplot=True)

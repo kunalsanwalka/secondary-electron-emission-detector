@@ -15,6 +15,9 @@ plt.switch_backend('TkAgg')
 # Make the font size larger
 plt.rcParams.update({'font.size': 18})
 
+# Global variable to store the simulation scan directory
+simulationScanDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/withRadialDiff/'
+
 def generate_filename_list(simulationName):
 
     # For each simulation, the data is stored under-
@@ -22,7 +25,7 @@ def generate_filename_list(simulationName):
     # /mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/[SIMULATION NAME]/simulation_results/[TIMES]/components/neut__kn1dc_5/kn1dc_gasbox.nc
     # Here, the times go from 1.000 to X.000 where X is the final timestep. This changes by simulation.
 
-    simulationDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/' + simulationName + '/simulation_results/'
+    simulationDir = simulationScanDir + simulationName + '/simulation_results/'
 
     # Find all the directories
     directories = [
@@ -259,7 +262,7 @@ def source_rate_flux(simName, makeplot=False):
 
 if __name__ == '__main__':
 
-    simName = 'nneut_1e18_gb_2e18_NBI_800kW_ECH_0kW'
+    simName = 'nneut_3e16_gb_1e18_NBI_800kW_ECH_0kW_ionDrrOn'
 
     # Get the filename lists
     filenameListMain, filenameListGasBox, filenameListCQL3D, filenameListEQDSK = generate_filename_list(simName)
@@ -271,10 +274,10 @@ if __name__ == '__main__':
     # timeArr = sim_times(filenameListCQL3D)
 
     # Time dependent source rates
-    # rhoH, Sion2D, rhoHGB, Sion2DGB, timeArr = time_dep_source_rate(simName, makeplot=True)
+    rhoH, Sion2D, rhoHGB, Sion2DGB, timeArr = time_dep_source_rate(simName, makeplot=True)
 
     # Source rates vs. flux
-    # source_rate_flux(simName)
+    # source_rate_flux(simName, True)
 
     # Plot flux surfaces
     # b_field_interpolation(filenameListEQDSK[0], makeplot=True)

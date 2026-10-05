@@ -466,7 +466,8 @@ def map_along_flux_surfaces(rMidplane, zGrid, Rmesh, Zmesh, psi, rSimOuter):
     return rMapped
 
 def build_density_extension(simulationName, shotnum, diodeArrayNum,
-                            rateKHz=10.0, tanhSteepness=4.0, tMin=None, tMax=None):
+                            rateKHz=10.0, tanhSteepness=4.0, tMin=None, tMax=None,
+                            redoAnalysis=False):
     """
     Build everything the density extension needs that does not depend on the simulation time.
 
@@ -494,6 +495,9 @@ def build_density_extension(simulationName, shotnum, diodeArrayNum,
     tMax : float
         End of the experimental time window the AXUV data is trimmed to. [s]
         Default is None, which keeps the data to the end of the shot.
+    redoAnalysis : bool
+        Force the extension to be rebuilt instead of loading the saved one.
+        Default is False.
 
     Returns
     -------
@@ -512,10 +516,22 @@ def build_density_extension(simulationName, shotnum, diodeArrayNum,
             'shapeExt' : 2D array [expTime x rExt] of the shape of the extension, normalized
                          to 1 at the edge of the simulation grid.
             'Rmesh', 'Zmesh', 'psi' : the eqdsk grid and poloidal flux on it. [m, m, Wb]
+
+    Notes
+    -----
+    The parts of the extension that do not come out of density_interp_data.pkl are cached in-
+    simulationScanDir + f'{simulationName}/density_interp_data_{shotnum}_extension.pkl'
+    which is kept separate from the density_interp_data.pkl of the unextended simulation. The
+    simulated density is not written to it, so it stays small and cannot go out of sync with
+    the unextended data. The cache records the settings it was built with and is rebuilt
+    automatically if any of them, or the simulation grid, has changed since.
     """
 
     # All simulations are stored in the same directory
     simulationDir = simulationScanDir + simulationName + '/'
+
+    # Kept separate from the unextended density_interp_data.pkl
+    savePath = simulationDir + f'density_interp_data_{shotnum}_extension.pkl'
 
     # Load the saved data
     with open(simulationDir + 'density_interp_data.pkl', 'rb') as loadFile:
@@ -532,6 +548,52 @@ def build_density_extension(simulationName, shotnum, diodeArrayNum,
     keep = find_valid_time_slices(times)
     times = times[keep]
     dens = np.clip(dens[keep], a_min=0, a_max=maxIonDensity)
+
+    # The settings the cached extension has to have been built with for it to be reused. The
+    # shot number is in the filename, so it does not need to be checked here.
+    settings = {'diodeArrayNum': diodeArrayNum,
+                'rateKHz': rateKHz,
+                'tanhSteepness': tanhSteepness,
+                'tMin': tMin,
+                'tMax': tMax}
+
+    # The extension is mapped along the flux surfaces starting from the outermost surface of
+    # the simulation grid, so a cache built on a different grid cannot be reused
+    gridFingerprint = {'rSimOuter': solrz[-1], 'zGrid': solzz[-1]}
+
+    # Load the saved extension if it already exists
+    try:
+
+        if redoAnalysis:
+            raise Exception('Forcing redo of the density extension')
+
+        print(f'Trying to load the saved density extension for {simulationName}')
+
+        with open(savePath, 'rb') as loadFile:
+            extData = pickle.load(loadFile)
+
+        if extData['settings'] != settings:
+            raise Exception('The saved density extension was built with different settings, '
+                            'rebuilding it.')
+
+        if not all(np.array_equal(extData['gridFingerprint'][key], gridFingerprint[key])
+                   for key in gridFingerprint):
+            raise Exception('The saved density extension was built on a different simulation '
+                            'grid, rebuilding it.')
+
+        # The simulated density is not cached, so that it cannot go out of sync with
+        # density_interp_data.pkl, and is put back on here
+        extData['times'] = times
+        extData['densSim'] = dens
+        extData['solrz'] = solrz
+        extData['solzz'] = solzz
+
+        return extData
+
+    except Exception as e:
+
+        print(e)
+        print('No saved density extension present, generating it.')
 
     # Plasma radius measured by AXUV vs. time
     axuvTimes, axuvRadius = load_axuv_radius(shotnum, diodeArrayNum, rateKHz=rateKHz,
@@ -598,7 +660,21 @@ def build_density_extension(simulationName, shotnum, diodeArrayNum,
                'shapeExt': shapeExt,
                'Rmesh': Rmesh,
                'Zmesh': Zmesh,
-               'psi': psi}
+               'psi': psi,
+               'settings': settings,
+               'gridFingerprint': gridFingerprint}
+
+    #### Save the data
+
+    # Everything except the simulated density, which is left in density_interp_data.pkl so
+    # that the two cannot go out of sync and so that this file stays small
+    saveData = {key: value for key, value in extData.items()
+                if key not in ('times', 'densSim', 'solrz', 'solzz')}
+
+    with open(savePath, 'wb') as saveFile:
+        pickle.dump(saveData, saveFile)
+
+    print(f'Saved the density extension to- \n {savePath}')
 
     return extData
 
@@ -642,6 +718,7 @@ def plot_flux_surfaces(ax, Rmesh, Zmesh, psi, rEdgeOfPlot, fluxColor='white', nu
 def extend_2d_density(simulationName, shotnum, diodeArrayNum, simTimeToPlot,
                       makeplot=False, expTimeToPlot=None,
                       rateKHz=10.0, tanhSteepness=4.0, tMin=None, tMax=None,
+                      redoAnalysis=False,
                       densCmap='inferno', extCmap='viridis', fluxColor='white',
                       numFluxSurfaces=15):
     """
@@ -689,6 +766,9 @@ def extend_2d_density(simulationName, shotnum, diodeArrayNum, simTimeToPlot,
     tMax : float
         End of the experimental time window the AXUV data is trimmed to. [s]
         Default is None, which keeps the data to the end of the shot.
+    redoAnalysis : bool
+        Force the density extension to be rebuilt instead of loading the saved one.
+        Default is False.
     densCmap : str
         Colormap used for the simulated density.
         Default is 'inferno'.
@@ -716,7 +796,7 @@ def extend_2d_density(simulationName, shotnum, diodeArrayNum, simTimeToPlot,
 
     extData = build_density_extension(simulationName, shotnum, diodeArrayNum,
                                       rateKHz=rateKHz, tanhSteepness=tanhSteepness,
-                                      tMin=tMin, tMax=tMax)
+                                      tMin=tMin, tMax=tMax, redoAnalysis=redoAnalysis)
 
     times = extData['times']
     solrz = extData['solrz']
@@ -813,6 +893,7 @@ def extend_2d_density(simulationName, shotnum, diodeArrayNum, simTimeToPlot,
 
 def extend_2d_density_all_times(simulationName, shotnum, diodeArrayNum,
                                 rateKHz=10.0, tanhSteepness=4.0, tMin=None, tMax=None,
+                                redoAnalysis=False,
                                 makeplot=False, simTimeToPlot=None, expTimeToPlot=None,
                                 densCmap='inferno', fluxColor='white', numFluxSurfaces=15):
     """
@@ -851,6 +932,9 @@ def extend_2d_density_all_times(simulationName, shotnum, diodeArrayNum,
     tMax : float
         End of the experimental time window the AXUV data is trimmed to. [s]
         Default is None, which keeps the data to the end of the shot.
+    redoAnalysis : bool
+        Force the density extension to be rebuilt instead of loading the saved one.
+        Default is False.
     makeplot : bool
         Whether to plot one of the extended 2D density profiles.
         Default is False.
@@ -888,7 +972,7 @@ def extend_2d_density_all_times(simulationName, shotnum, diodeArrayNum,
 
     extData = build_density_extension(simulationName, shotnum, diodeArrayNum,
                                       rateKHz=rateKHz, tanhSteepness=tanhSteepness,
-                                      tMin=tMin, tMax=tMax)
+                                      tMin=tMin, tMax=tMax, redoAnalysis=redoAnalysis)
 
     simTime = extData['times']
     densSim = extData['densSim']
