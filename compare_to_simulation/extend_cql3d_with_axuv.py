@@ -1091,7 +1091,6 @@ def extend_2d_density_all_times(simulationName, shotnum, diodeArrayNum,
 
     return dens, solrzNew, solzzNew, expTime, simTime
 
-
 if __name__ == '__main__':
 
     simName = 'nneut_1e18_gb_2e17_NBI_800kW_ECH_0kW_ionDrrOn'

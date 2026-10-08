@@ -594,8 +594,8 @@ def compute_single_detector_see_density(i, detDictList, nbiVoltageArr, nbiTimeAr
         if args.debug:
             print(f'Calculating line integrated density for detector {i+1}.')
 
-        signal = detDict['raw_signal_slow']
-        refSignal = detDict['ref_raw_signal_slow']
+        signal = detDict['raw_signal_slow'].copy()
+        refSignal = detDict['ref_raw_signal_slow'].copy()
         newTimeArr = detDict['time_arr_slow']
 
         # Load the NBI current for the plasma and reference shot
@@ -784,8 +784,8 @@ def calculate_line_integrated_density_errors(detDictList):
         else:
 
             #### Load the raw data
-            signal = detDict['raw_signal_slow']
-            refSignal = detDict['ref_raw_signal_slow']
+            signal = detDict['raw_signal_slow'].copy()
+            refSignal = detDict['ref_raw_signal_slow'].copy()
             newTimeArr = detDict['time_arr_slow']
 
             #### Scale the reference data based on the NBI current
@@ -1041,6 +1041,127 @@ def plot_data(detDictList, timesToPlot):
 
     return
 
+def plot_nbi_and_central_detector(savefig=False):
+    """
+    Make a 3 panel summary plot for the detector with the smallest impact parameter that has valid data.
+
+    Top    : NBI voltage (red) and current (blue).
+    Middle : Plasma and reference signals for the detector.
+    Bottom : Line-integrated density for the detector (with 1 sigma error band).
+
+    The raw data is loaded and the line integrated densities are calculated within this function, so it can be called on its own.
+
+    Parameters
+    ----------
+    savefig : bool
+        If true, the figure is saved to /home/sanwalka/shinethru/plots/{args.shotnum}_density_workflow.png
+    """
+
+    #### Load the data and calculate the line integrated densities
+    pickleFilePath = '/home/sanwalka/shinethru/lookup_tables/see_detector_dictionary.pkl'
+    detDictList = load_detector_dictionary(pickleFilePath)
+    detDictList = node_names(detDictList)
+    detDictList = add_resistance(detDictList)
+    detDictList = load_raw_data(detDictList)
+    detDictList = calculate_line_integrated_densities(detDictList)
+    detDictList = calculate_line_integrated_density_errors(detDictList)
+
+    #### Find the detector with the smallest impact parameter that has valid data
+    validIdx = []
+    for i in range(len(detDictList)):
+
+        detDict = detDictList[i]
+
+        if detDict.get('line_integrated_density') is None or detDict.get('ref_raw_signal_slow') is None:
+            continue
+
+        signal = detDict['raw_signal_slow']
+        refSignal = detDict['ref_raw_signal_slow']
+
+        # Reject detectors with no finite data or a flat signal
+        if not (np.isfinite(signal).any() and np.isfinite(refSignal).any()):
+            continue
+        if np.nanmax(signal) == np.nanmin(signal) or np.nanmax(refSignal) == np.nanmin(refSignal):
+            continue
+
+        validIdx.append(i)
+
+    if len(validIdx) == 0:
+        logger.error('No detectors with valid data, skipping plot_nbi_and_central_detector.')
+        return
+
+    impactParams = np.array([detDictList[i]['impact_param_vertical'] for i in validIdx]) # [mm]
+    detIdx = validIdx[np.argmin(np.abs(impactParams))]
+    detDict = detDictList[detIdx]
+
+    logger.info(f'Plotting NBI and SEE data for detector {detIdx+1}.')
+
+    #### Load the NBI voltage and current
+    tree = mds.Tree('wham', args.shotnum)
+    nbiVoltage = tree.getNode('nbi.v_beam').getData().data()
+    nbiCurrent = tree.getNode('nbi.i_beam').getData().data()
+    nbiTimeArr = tree.getNode('nbi.v_beam').dim_of().data()
+    tree.close()
+
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 15), sharex=True, tight_layout=True)
+
+    impactParam = np.round(detDict['impact_param_vertical']/10, 2)
+    fig.suptitle(f'{args.shotnum} \n Detector {detIdx+1} ({impactParam}cm)')
+
+    #### Top plot - NBI voltage and current
+    ax1.plot(nbiTimeArr*1e3, nbiVoltage*1e-3, color='red', label='Voltage [kV]')
+    ax1.plot(nbiTimeArr*1e3, nbiCurrent, color='blue', label='Current [A]')
+    ax1.set_ylabel('NBI')
+    ax1.legend()
+
+    #### Middle plot - plasma and reference signals
+
+    # Scale the reference signal by the ratio of the plasma and reference NBI currents (same as in compute_single_detector_see_density)
+    refTree = mds.Tree('wham', args.ref_shotnum)
+    refNBICurrent = refTree.getNode('nbi.i_beam').getData().data()
+    refTree.close()
+
+    plasmaNBICurrSlow = np.interp(detDict['time_arr_slow'], nbiTimeArr, nbiCurrent)
+    refNBICurrSlow = np.interp(detDict['time_arr_slow'], nbiTimeArr, refNBICurrent)
+    nbiVoltageSlow = np.interp(detDict['time_arr_slow'], nbiTimeArr, nbiVoltage)
+
+    # Only scale when the NBI is on, otherwise the ratio of the currents blows up
+    scaling = np.ones_like(refNBICurrSlow)
+    nbiOn = nbiVoltageSlow > 5e3
+    scaling[nbiOn] = plasmaNBICurrSlow[nbiOn]/refNBICurrSlow[nbiOn]
+    scaledRefSignal = detDict['ref_raw_signal_slow']*scaling
+
+    ax2.plot(detDict['time_arr_slow']*1e3, detDict['raw_signal_slow']*1e3, label=f'Plasma ({args.shotnum})')
+    ax2.plot(detDict['time_arr_slow']*1e3, scaledRefSignal*1e3, label=f'Reference ({args.ref_shotnum}), scaled to NBI current')
+    ax2.set_ylabel('Raw Signal [mA]')
+    ax2.legend()
+
+    #### Bottom plot - line integrated density
+    timeArr = detDict['time_arr_slow']*1e3
+    lineDens = detDict['line_integrated_density']
+    lineDensSigma = detDict.get('line_integrated_density_sigma')
+
+    ax3.plot(timeArr, lineDens, color='k')
+    if lineDensSigma is not None:
+        ax3.fill_between(timeArr, lineDens - lineDensSigma, lineDens + lineDensSigma, color='k', alpha=0.3)
+    ax3.set_xlabel('Time [ms]')
+    ax3.set_ylabel(r'$\int n_p \cdot dl$ [m$^{-2}$]')
+    ax3.set_ylim(0, None)
+
+    # Zoom in on when the NBI is on (same 5kV threshold as used in the density calculation), with some padding
+    nbiOnTimes = nbiTimeArr[nbiVoltage > 5e3]*1e3
+    if len(nbiOnTimes) > 0:
+        ax3.set_xlim(nbiOnTimes[0] - 2, nbiOnTimes[-1] + 2)
+
+    if savefig:
+        savename = f'/home/sanwalka/shinethru/plots/{args.shotnum}_density_workflow.png'
+        logger.info(f'Saving figure to {savename}')
+        plt.savefig(savename, dpi=600)
+
+    plt.show()
+
+    return
+
 if __name__ == "__main__":
 
     # Initialize the logger
@@ -1060,6 +1181,9 @@ if __name__ == "__main__":
 
     except Exception as e:
         logger.error(e)
+
+    # Plot the NBI, SEE signals, and line integrated density for the central detector
+    plot_nbi_and_central_detector(savefig=True)
 
     # Times to plot the line integrated densities
     global timesToPlot

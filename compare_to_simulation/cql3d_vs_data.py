@@ -2065,7 +2065,7 @@ if __name__ == '__main__':
         detDictList = pickle.load(pickleFile)
 
     # Simulation directory
-    simulationName = 'nneut_1e18_gb_1e18_NBI_800kW_ECH_0kW'
+    simulationName = 'nneut_2e17_gb_2e17_NBI_800kW_ECH_0kW'
     # Shot number
     shotnum = 260426037
     shotnum = 260709060
@@ -2084,10 +2084,10 @@ if __name__ == '__main__':
 
     # Compare simulation to experiment. The AXUV window sets the experimental timebase of the
     # comparison, as the extension is only defined where AXUV measured a plasma radius.
-    # comparisonArr, simTimeArr, expTimeArr = compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=False, makeplot=True, saveplot=True,
-    #                                                                          axuvTMin=3e-3, axuvTMax=12e-3)
+    comparisonArr, simTimeArr, expTimeArr = compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=False, makeplot=True, saveplot=True,
+                                                                             axuvTMin=3e-3, axuvTMax=12e-3)
 
     # Compare the experiment to all simulations
-    compare_all_simulations(shotnum, 
-                            metricList=[cm.normalized_mean_abs_error],
-                            makeIndividualPlots=False, makePanelPlot=True, axuvTMin=3e-3, axuvTMax=12e-3)
+    # compare_all_simulations(shotnum, 
+    #                         metricList=[cm.normalized_mean_abs_error],
+    #                         makeIndividualPlots=False, makePanelPlot=True, axuvTMin=3e-3, axuvTMax=12e-3)

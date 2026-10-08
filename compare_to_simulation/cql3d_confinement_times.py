@@ -8,7 +8,8 @@ import xarray as xr
 import numpy as np
 import matplotlib.pyplot as plt
 
-from kn1dc_parser import generate_filename_list, time_dep_source_rate
+from kn1dc_parser import generate_filename_list, time_dep_source_rate, disambiguate_source_rate
+import extend_cql3d_with_axuv as eca
 
 # Global variable to store the simulation scan directory
 simulationScanDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/withRadialDiff/'
@@ -116,7 +117,36 @@ def density_profile(simName, timeArrIPS, makeplot=False):
 
     return densIPS
 
-def radial_taup_profiles(simName, timesToPlotSim, makeplot=False):
+def radial_taup_profiles(simName, timesToPlotSim, tStart=None, tStop=None, legendSpacing=0.5e-3,
+                         makeplot=False, saveplot=False):
+    """
+    Plot the radial confinement time profiles (tauc_code) from CQL3D between tStart and tStop.
+
+    Profiles at timesToPlotSim are highlighted in red and set the y-axis limit.
+
+    Parameters
+    ----------
+    simName : str
+        The name of the simulation.
+    timesToPlotSim : np.array
+        The simulation times to highlight. [s]
+        The closest available simulated timestep is used.
+    tStart : float
+        Earliest time to plot. [s]
+        Default is None, which starts at the beginning of the simulation.
+    tStop : float
+        Latest time to plot. [s]
+        Default is None, which stops at the end of the simulation.
+    legendSpacing : float
+        Time spacing between the profiles labelled in the legend. [s]
+        Default is 0.5e-3.
+    makeplot : bool
+        Show the plot.
+        Default is False.
+    saveplot : bool
+        Save the plot in /home/sanwalka/shinethru/plots/ as f'{simName}_tauc.png'.
+        Default is False.
+    """
 
     # Filename list for the simulation
     filenameListMain, filenameListGasBox, filenameListCQL3D, filenameListEQDSK = generate_filename_list(simName)
@@ -185,7 +215,16 @@ def radial_taup_profiles(simName, timesToPlotSim, makeplot=False):
 
         plt.show()
 
-    if makeplot:
+    if makeplot or saveplot:
+
+        # Default to the full simulation time range
+        if tStart is None:
+            tStart = timeArrCQL3D[0]
+        if tStop is None:
+            tStop = timeArrCQL3D[-1]
+
+        # Indices of the timesteps within [tStart, tStop]
+        plotIdxArr = np.where((timeArrCQL3D >= tStart) & (timeArrCQL3D <= tStop))[0]
 
         fig = plt.figure(figsize=(12, 8), tight_layout=True)
         fig.suptitle(simName)
@@ -193,31 +232,191 @@ def radial_taup_profiles(simName, timesToPlotSim, makeplot=False):
         # CQL3D direct output
         ax = fig.add_subplot(111)
 
-        cmap = plt.get_cmap('viridis', len(timeArrCQL3D)).colors
+        cmap = plt.get_cmap('viridis', len(plotIdxArr)).colors
 
-        simIdxArr = np.zeros_like(timesToPlotSim)
+        simIdxArr = np.zeros(len(timesToPlotSim), dtype=int)
         for i in range(len(timesToPlotSim)):
             simIdxArr[i] = np.argmin(np.abs(timeArrCQL3D-timesToPlotSim[i]))
 
+        # Timesteps closest to each multiple of legendSpacing get a legend label
+        legendTimes = np.arange(tStart, tStop + 1e-3*legendSpacing, legendSpacing)
+        legendIdxArr = plotIdxArr[[np.argmin(np.abs(timeArrCQL3D[plotIdxArr]-t)) for t in legendTimes]]
+
         tauPImportant = []
-        for i in range(len(timeArrCQL3D)):
+        for j, i in enumerate(plotIdxArr):
 
             if i in simIdxArr:
                 ax.plot(rArr2D[0], tauPCQL3D[i]*1e3, color='red', label=f'{timeArrCQL3D[i]*1e3:.1f}', linewidth=5, zorder=10)
                 tauPImportant.append(tauPCQL3D[i]*1e3)
-            elif i % 50 == 0:
-                ax.plot(rArr2D[0], tauPCQL3D[i]*1e3, color=cmap[i], label=f'{timeArrCQL3D[i]*1e3:.1f}')
+            elif i in legendIdxArr:
+                ax.plot(rArr2D[0], tauPCQL3D[i]*1e3, color=cmap[j], label=f'{timeArrCQL3D[i]*1e3:.1f}')
             else:
-                ax.plot(rArr2D[0], tauPCQL3D[i]*1e3, color=cmap[i])
+                ax.plot(rArr2D[0], tauPCQL3D[i]*1e3, color=cmap[j])
         tauPImportant = np.array(tauPImportant)
 
-        ax.set_ylim(0, 1.1*tauPImportant.max())
+        # Scale to the highlighted profiles if any are in the time window
+        if len(tauPImportant) > 0:
+            ax.set_ylim(0, 1.1*tauPImportant.max())
+        else:
+            ax.set_ylim(0, None)
         ax.legend(title='Time [ms]', ncols=3, framealpha=1)
         ax.set_ylabel('Confinement Time [ms]')
         ax.set_xlabel('Radius [m]')
         ax.set_title('tauc_code')
 
+        if saveplot:
+            savePath = f'/home/sanwalka/shinethru/plots/{simName}_tauc.png'
+            plt.savefig(savePath, dpi=600)
+            print(f'Saved plot to {savePath}')
+
+        if makeplot:
+            plt.show()
+        else:
+            plt.close(fig)
+
+    return
+
+def plot_taup_density_source(simName, shotnum, timeToPlot, timeToPlotExp, diodeArrayNum=1,
+                             rateKHz=10.0, tanhSteepness=4.0, axuvTMin=None, axuvTMax=None,
+                             redoAnalysis=False, xMax=0.2, makeplot=True, saveplot=False):
+    """
+    Plot the confinement time, midplane density and disambiguated source rates vs. radius at a given time.
+
+    Top- Confinement time calculated directly in CQL3D (tauc_code).
+    Middle- Ion density at the midplane, extended out to the plasma radius measured by AXUV
+            (see build_density_extension in extend_cql3d_with_axuv.py).
+    Bottom- Gas box and main vessel source rates at the midplane (see disambiguate_source_rate in kn1dc_parser.py).
+
+    Parameters
+    ----------
+    simName : str
+        The name of the simulation.
+    shotnum : int
+        The shot number the AXUV plasma radius of the extension is taken from.
+    timeToPlot : float
+        The simulation time at which to plot all the quantities. [s]
+        The closest available timestep of each quantity is used. The source rates are only
+        saved once per IPS timestep, so their time can differ from that of the other two.
+    timeToPlotExp : float
+        The experimental time the AXUV plasma radius of the extension is taken at. [s]
+        The closest available AXUV timestep is used.
+    diodeArrayNum : int
+        The diode array the AXUV plasma radius is taken from, i.e. 1 for DIODEARRAY1.
+        Default is 1.
+    rateKHz : float
+        Rate the native AXUV data is averaged down to. [kHz]
+        Default is 10.
+    tanhSteepness : float
+        Steepness of the tanh fall-off of the extension.
+        Default is 4.
+    axuvTMin : float
+        Start of the experimental time window the AXUV data is trimmed to. [s]
+        Default is None, which keeps the data from the start of the shot.
+    axuvTMax : float
+        End of the experimental time window the AXUV data is trimmed to. [s]
+        Default is None, which keeps the data to the end of the shot.
+    redoAnalysis : bool
+        Force the extension to be rebuilt instead of loading the saved one.
+        Default is False.
+    xMax : float
+        Largest radius to plot. [m]
+        Default is 0.2.
+    makeplot : bool
+        Show the plot.
+        Default is True.
+    saveplot : bool
+        Save the plot in /home/sanwalka/shinethru/plots/ as f'{simName}_taup_dens_source.png'.
+        Default is False.
+    """
+
+    # Filename list for the simulation
+    _, _, filenameListCQL3D, _ = generate_filename_list(simName)
+
+    #### Confinement time
+
+    # Confinement time calculated directly in CQL3D [Time x Radius]
+    tauPCQL3D, timeArrCQL3D = taup_cql3d(filenameListCQL3D)
+
+    # Radial grid of the CQL3D flux surfaces [Time x Radius]
+    _, rArr2D = flux_tube_vol(filenameListCQL3D)
+
+    tauPIdx = np.argmin(np.abs(timeArrCQL3D - timeToPlot))
+
+    #### Midplane density
+
+    # That module keeps its own copy of the scan directory, so point it at the one used here
+    eca.simulationScanDir = simulationScanDir
+
+    extData = eca.build_density_extension(simName, shotnum, diodeArrayNum,
+                                          rateKHz=rateKHz, tanhSteepness=tanhSteepness,
+                                          tMin=axuvTMin, tMax=axuvTMax,
+                                          redoAnalysis=redoAnalysis)
+
+    # [simTime x r x z], with the restart slices already dropped and the density clipped
+    times = extData['times']
+    dens = extData['densSim']
+
+    densIdx = np.argmin(np.abs(times - timeToPlot))
+    axuvIdx = np.argmin(np.abs(extData['axuvTimes'] - timeToPlotExp))
+
+    # Midplane density as CQL3D solves it
+    rSim = extData['solrz'][:, 0]
+    densSimMid = dens[densIdx, :, 0]
+
+    # The extension is its shape scaled by the midplane density at the edge of the simulation grid.
+    # The edge point of the simulation is prepended so that the two curves join up.
+    rExt = np.concatenate([[rSim[-1]], extData['rExtGrid']])
+    densExtMid = densSimMid[-1] * np.concatenate([[1], extData['shapeExt'][axuvIdx]])
+
+    #### Disambiguated source rates
+
+    rhoH, SionMV, SionGBMid, timeSource = disambiguate_source_rate(simName, timeToPlot, makeplot=False)
+
+    fig = plt.figure(figsize=(10, 14), tight_layout=True)
+    fig.suptitle(simName, fontsize=16)
+
+    # Confinement time
+    ax1 = fig.add_subplot(3, 1, 1)
+    ax1.plot(rArr2D[0], tauPCQL3D[tauPIdx]*1e3, color='tab:red', linewidth=3)
+    ax1.set_ylabel('Confinement Time [ms]')
+    ax1.set_ylim(0, None)
+    ax1.set_title(f'tauc_code, Time = {timeArrCQL3D[tauPIdx]*1e3:.2f} ms')
+
+    # Midplane density
+    ax2 = fig.add_subplot(3, 1, 2, sharex=ax1)
+    ax2.plot(rSim, densSimMid, label='CQL3D', color='tab:purple', linewidth=3)
+    ax2.plot(rExt, densExtMid, label=f'AXUV DA{diodeArrayNum} extension',
+             color='tab:purple', linewidth=3, linestyle='--')
+    ax2.set_ylabel(r'n$_i$ [m$^{-3}$]')
+    ax2.set_ylim(0, None)
+    ax2.legend()
+    ax2.set_title(f'Midplane Density, Time = {times[densIdx]*1e3:.2f} ms\n'
+                  f'Shot {shotnum} AXUV at {extData["axuvTimes"][axuvIdx]*1e3:.2f} ms')
+
+    # Disambiguated source rates
+    ax3 = fig.add_subplot(3, 1, 3, sharex=ax1)
+    ax3.plot(rhoH, SionMV, label='Main Vessel', color='tab:blue', linewidth=3)
+    ax3.plot(rhoH, SionGBMid, label='Gas Box', color='tab:orange', linewidth=3)
+    ax3.set_ylabel('Source Rate [#/s]')
+    ax3.set_yscale('log')
+    ax3.legend()
+    ax3.set_title(f'Disambiguated Source Rate (z = 0 m), Time = {timeSource*1e3:.2f} ms')
+
+    ax1.set_xlim(0, xMax)
+
+    ax1.tick_params(labelbottom=False)
+    ax2.tick_params(labelbottom=False)
+    ax3.set_xlabel('Radius [m]')
+
+    if saveplot:
+        savePath = f'/home/sanwalka/shinethru/plots/{simName}_taup_dens_source.png'
+        plt.savefig(savePath, dpi=600)
+        print(f'Saved plot to {savePath}')
+
+    if makeplot:
         plt.show()
+    else:
+        plt.close(fig)
 
     return
 
@@ -228,4 +427,8 @@ if __name__ == '__main__':
     # Times to plot (in seconds)
     timesToPlotSim = np.array([3]) * 1e-3
 
-    radial_taup_profiles(simName, timesToPlotSim, makeplot=True)
+    # radial_taup_profiles(simName, timesToPlotSim, makeplot=True, saveplot=True)
+    # radial_taup_profiles(simName, timesToPlotSim, tStart=0.5e-3, tStop=4.5e-3, makeplot=True, saveplot=True)
+
+    # Confinement time, midplane density and disambiguated source rates at a single time
+    plot_taup_density_source(simName, shotnum=260709061, timeToPlot=3e-3, timeToPlotExp=7.83e-3, makeplot=True, saveplot=True)

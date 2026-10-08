@@ -449,6 +449,23 @@ def plot_radial_and_synthetic_with_thomson(simulationName, shotnum, timesToPlotS
 
     ax1.legend()
 
+    # Flip the panels so the synthetic diagnostic is on top and the radial profile with the
+    # Thomson data is on the bottom
+    gs = ax1.get_subplotspec().get_gridspec()
+    ax1.set_subplotspec(gs[1])
+    ax2.set_subplotspec(gs[0])
+
+    # Move the title to the new top panel and the radius axis to the new bottom panel
+    ax2.set_title(ax1.get_title())
+    ax1.set_title('')
+
+    xLim = ax2.get_xlim()
+    ax1.xaxis.set_major_locator(mpl.ticker.AutoLocator())
+    ax1.set_xlim(xLim)
+    ax1.set_xlabel(ax2.get_xlabel())
+    ax2.set_xticks([])
+    ax2.set_xlabel('')
+
     if saveplot:
         savePath = f'/home/sanwalka/shinethru/plots/{simulationName}_{shotnum}_withThomsonComparison.png'
         plt.savefig(savePath, dpi=600)
@@ -757,11 +774,12 @@ def plot_2d_density_contour(simulationName, timeToPlot, densCmap='inferno',
 if __name__ == "__main__":
 
     simName = 'nneut_3e16_gb_1e18_NBI_800kW_ECH_0kW_ionDrrOn'
+    simName = 'nneut_2e17_gb_2e17_NBI_800kW_ECH_0kW_ionDrrOn'
     shotnum = 260709061
 
     # Times to plot (in seconds)
     timesToPlotSim = np.array([3]) * 1e-3
-    timesToPlotExp = np.array([4]) * 1e-3
+    timesToPlotExp = np.array([7.83]) * 1e-3
 
     # plot_radial_profiles(timeDelta=0.5e-3, cmap='viridis')
     # plot_2d_density_contour(simName, timesToPlotSim[0])
