@@ -804,6 +804,62 @@ def time_dependent_see_detector(simulationName, detDictList, makeplot=False, tim
             
     return detDictList
 
+def axuv_window_mask(dataObj, expTime, axuvTMin, axuvTMax):
+    """
+    Find the experimental times of saved data that lie in the requested AXUV time window.
+
+    The data is saved with the window it was built with, so a narrower window can be cut out
+    of it rather than regenerated. Every comparison metric reduces over the detectors only, so
+    the values at the times that are kept do not depend on the window.
+
+    Parameters
+    ----------
+    dataObj : NpzFile
+        The saved data. Holds 'axuvTMin' and 'axuvTMax' (NaN for no limit), apart from files
+        saved before these were recorded.
+    expTime : np.array
+        1D array of the experimental times of the saved data. [s]
+    axuvTMin : float
+        Start of the requested window. [s]
+        None for no limit.
+    axuvTMax : float
+        End of the requested window. [s]
+        None for no limit.
+
+    Returns
+    -------
+    keep : np.array
+        1D boolean array of the times in expTime that are in the requested window.
+
+    Raises
+    ------
+    Exception
+        If the saved data does not cover the requested window, so that it is regenerated.
+    """
+
+    if 'axuvTMin' in dataObj:
+        savedTMin = float(dataObj['axuvTMin'])
+        savedTMax = float(dataObj['axuvTMax'])
+    else:
+        # Older files do not record the window, so it is taken from the times. These are the
+        # centers of the bins the AXUV data was averaged down into, so are allowed to sit up
+        # to one sample inside the window they were built with.
+        dt = np.median(np.diff(expTime))
+        savedTMin = expTime.min() - dt
+        savedTMax = expTime.max() + dt
+
+    # No limit is stored as NaN and passed in as None
+    savedTMin = -np.inf if np.isnan(savedTMin) else savedTMin
+    savedTMax = np.inf if np.isnan(savedTMax) else savedTMax
+    tMin = -np.inf if axuvTMin is None else axuvTMin
+    tMax = np.inf if axuvTMax is None else axuvTMax
+
+    if tMin < savedTMin or tMax > savedTMax:
+        raise Exception(f'The saved data covers {savedTMin} s to {savedTMax} s, which does not '
+                        f'cover the requested window of {tMin} s to {tMax} s')
+
+    return (expTime >= tMin) & (expTime <= tMax)
+
 def time_dependent_see_detector_extended(simulationName, shotnum, detDictList, diodeArrayNum=1,
                                          rateKHz=10.0, tanhSteepness=4.0,
                                          axuvTMin=None, axuvTMax=None, redoAnalysis=False):
@@ -876,9 +932,14 @@ def time_dependent_see_detector_extended(simulationName, shotnum, detDictList, d
 
         dataObj = np.load(savePath)
 
-        syntheticSignal = dataObj['syntheticSignal']
         simTime = dataObj['simTime']
         expTime = dataObj['expTime']
+
+        # Cut the requested window out of the saved one
+        keep = axuv_window_mask(dataObj, expTime, axuvTMin, axuvTMax)
+
+        syntheticSignal = dataObj['syntheticSignal'][:, keep]
+        expTime = expTime[keep]
 
         return syntheticSignal, simTime, expTime
 
@@ -901,18 +962,11 @@ def time_dependent_see_detector_extended(simulationName, shotnum, detDictList, d
     # extend_2d_density_all_times() assembles its density profile out of, and it is used here
     # directly so that the full [simTime x expTime x R x Z] profile (which runs to hundreds of
     # MB) does not have to be held in memory just to be line-integrated.
-    # redoAnalysis is passed on so that forcing a redo here also rebuilds the cached
-    # extension, rather than recomputing the signals from a stale one
-    try:
+    # The AXUV data is checked for explicitly rather than by catching a FileNotFoundError from
+    # build_density_extension(), as that is also raised for a missing simulation file (e.g. a
+    # misspelt simulation name), which would then rerun the AXUV script on every call
+    if len(eca.axuv_data_files(shotnum, diodeArrayNum)) == 0:
 
-        extData = eca.build_density_extension(simulationName, shotnum, diodeArrayNum,
-                                              rateKHz=rateKHz, tanhSteepness=tanhSteepness,
-                                              tMin=axuvTMin, tMax=axuvTMax,
-                                              redoAnalysis=redoAnalysis)
-
-    except FileNotFoundError as e:
-
-        print(e)
         print(f'No AXUV data present for shot {shotnum}, generating it.')
 
         # The AXUV script saves its results to the data directory that
@@ -921,10 +975,12 @@ def time_dependent_see_detector_extended(simulationName, shotnum, detDictList, d
         subprocess.run([sys.executable, 'axuv_data_output.py', '-s', f'{shotnum}'],
                        cwd=axuvScriptDir, check=True)
 
-        extData = eca.build_density_extension(simulationName, shotnum, diodeArrayNum,
-                                              rateKHz=rateKHz, tanhSteepness=tanhSteepness,
-                                              tMin=axuvTMin, tMax=axuvTMax,
-                                              redoAnalysis=redoAnalysis)
+    # redoAnalysis is passed on so that forcing a redo here also rebuilds the cached
+    # extension, rather than recomputing the signals from a stale one
+    extData = eca.build_density_extension(simulationName, shotnum, diodeArrayNum,
+                                          rateKHz=rateKHz, tanhSteepness=tanhSteepness,
+                                          tMin=axuvTMin, tMax=axuvTMax,
+                                          redoAnalysis=redoAnalysis)
 
     simTime = extData['times']
     expTime = extData['axuvTimes']
@@ -990,10 +1046,14 @@ def time_dependent_see_detector_extended(simulationName, shotnum, detDictList, d
 
     #### Save the data
 
+    # The window is saved so that a narrower one can be cut out of this data later. No limit
+    # is saved as NaN.
     np.savez(savePath,
              syntheticSignal = syntheticSignal,
              simTime = simTime,
-             expTime = expTime)
+             expTime = expTime,
+             axuvTMin = np.nan if axuvTMin is None else axuvTMin,
+             axuvTMax = np.nan if axuvTMax is None else axuvTMax)
 
     print(f'Saved the extended synthetic detector data to- \n {savePath}')
 
@@ -1529,9 +1589,14 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
 
         dataObj = np.load(filename)
 
-        comparisonArr = dataObj['comparisonArr']
         simTimeArr = dataObj['simTimeArr']
         expTimeArr = dataObj['expTimeArr']
+
+        # Cut the requested window out of the saved one
+        keep = axuv_window_mask(dataObj, expTimeArr, axuvTMin, axuvTMax)
+
+        comparisonArr = dataObj['comparisonArr'][:, keep]
+        expTimeArr = expTimeArr[keep]
 
     except Exception as e:
 
@@ -1647,17 +1712,22 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
         # Save the data
         filename = comparison_filename(simulationName, shotnum, metricName)
 
+        # The window is saved so that a narrower one can be cut out of this data later. No
+        # limit is saved as NaN.
         np.savez(filename,
                  comparisonArr = comparisonArr,
                  simTimeArr = simTimeArr,
-                 expTimeArr = expTimeArr)
+                 expTimeArr = expTimeArr,
+                 axuvTMin = np.nan if axuvTMin is None else axuvTMin,
+                 axuvTMax = np.nan if axuvTMax is None else axuvTMax)
             
     if makeplot:
 
         import matplotlib.ticker as ticker
 
         # Plot the comparison
-        fig = plt.figure(figsize=(12, 5), tight_layout=True)
+        # The axes have an equal aspect, so a wide figure only leaves whitespace beside them
+        fig = plt.figure(figsize=(8, 6), layout='constrained')
         ax = fig.add_subplot(111)
 
         # Only look at the data between tExpStart and tExpStop
@@ -1688,7 +1758,14 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
 
         ax.set_aspect('equal')
 
-        ax.set_title(f'{shotnum} vs {simulationName}\nAXUV extension, {metricName}')
+        # Label the simulation by its neutral densities, falling back on its name if they
+        # cannot be parsed out of it
+        mainVesselDens, gasBoxDens = parse_simulation_name(simulationName)
+        if mainVesselDens is not None:
+            ax.set_title(f'{shotnum} vs. \n Main Vessel {density_label(mainVesselDens)}, '
+                         f'Gas Box {density_label(gasBoxDens)}')
+        else:
+            ax.set_title(f'{shotnum} vs. {simulationName}')
 
         cbar = fig.colorbar(pltObj)
         cbar.locator = ticker.LogLocator(base=10.0, numticks=10)
@@ -1698,10 +1775,10 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
         if saveplot:
 
             # Make a directory to store plots if it does not already exist
-            saveDir = simulationDir + 'plots'
+            saveDir = '/home/sanwalka/shinethru/plots'
             os.makedirs(saveDir, exist_ok=True)
 
-            plt.savefig(saveDir+f'/{shotnum}_vs_{simulationName}_{metricName}_extension.png', dpi=300)
+            plt.savefig(saveDir+f'/{shotnum}_vs_{simulationName}_{metricName}_extension.png', dpi=300, bbox_inches='tight')
 
         plt.show()
 
@@ -1743,7 +1820,7 @@ def parse_simulation_name(simulationName):
 
     return mainVesselDens, gasBoxDens
 
-def density_label(dens):
+def density_label(dens, units=True):
     """
     Make a nice LaTeX label out of a neutral density value.
 
@@ -1751,6 +1828,9 @@ def density_label(dens):
     ----------
     dens : float
         Neutral density. [m^-3]
+    units : bool
+        Append the units to the label.
+        Default is True.
 
     Returns
     -------
@@ -1767,7 +1847,10 @@ def density_label(dens):
     else:
         mantissaStr = f'{mantissa:.1f}'
 
-    label = rf'${mantissaStr}\times10^{{{exponent}}}\,\mathrm{{m^{{-3}}}}$'
+    if units:
+        label = rf'${mantissaStr}\times10^{{{exponent}}}\,\mathrm{{m^{{-3}}}}$'
+    else:
+        label = rf'${mantissaStr}\times10^{{{exponent}}}$'
 
     return label
 
@@ -1806,7 +1889,7 @@ def plot_simulation_scan_panel(shotnum, metric=cm.normalized_mean_abs_error, sim
         Upper limit of the shared colorbar.
         Default is None, in which case it is taken from the data.
     saveplot : bool
-        Save the plot in simulationScanDir + 'plots/'.
+        Save the plot in /home/sanwalka/shinethru/plots/.
         Default is False.
 
     Returns
@@ -1930,31 +2013,84 @@ def plot_simulation_scan_panel(shotnum, metric=cm.normalized_mean_abs_error, sim
                                      norm = norm,
                                      cmap = 'viridis')
 
-                ax.set_title(simulationName, fontsize=8)
-
                 # Only label the outer axes
                 if i == nRows-1:
                     ax.set_xlabel('Experimental Time [ms]')
                 if j == 0:
                     ax.set_ylabel('Simulation Time [ms]')
 
-        # Label the rows and columns with the neutral densities
-        for j in range(nCols):
-            axs[0, j].annotate(density_label(gasBoxDensArr[j]),
-                               xy = (0.5, 1.0), xycoords = 'axes fraction',
-                               xytext = (0, 30), textcoords = 'offset points',
-                               ha = 'center', va = 'bottom', fontsize = 16)
-        for i in range(nRows):
-            axs[i, 0].annotate(density_label(mainVesselDensArr[i]),
-                               xy = (0.0, 0.5), xycoords = 'axes fraction',
-                               xytext = (-60, 0), textcoords = 'offset points',
-                               ha = 'right', va = 'center', fontsize = 16,
-                               rotation = 90)
-
-        fig.suptitle(f'Shot {shotnum}: 2D scan in main vessel (rows) and gas box (columns) neutral density',
-                     fontsize = 18)
-
         fig.tight_layout(rect=[0.04, 0, 0.92, 0.97])
+
+        # The grid cell each sub-plot was given by tight_layout(). The sub-plots are resized
+        # within their cells below, so everything else is placed relative to the cells.
+        cells = [[axs[i, j].get_position() for j in range(nCols)] for i in range(nRows)]
+
+        figWidthIn, figHeightIn = fig.get_size_inches()
+
+        # Every sub-plot uses the same scale [in/ms] on both axes, so that the height of each
+        # one shows how long that simulation ran for. The scale is the largest one at which
+        # the longest simulation still fits in its cell.
+        expSpan = max(np.ptp(expTimeArr) for _, _, expTimeArr, _ in dataDict.values()) * 1e3
+        simSpan = max(np.ptp(simTimeArr) for _, simTimeArr, _, _ in dataDict.values()) * 1e3
+        scale = min(min(cell.width for row in cells for cell in row) * figWidthIn / expSpan,
+                    min(cell.height for row in cells for cell in row) * figHeightIn / simSpan)
+
+        for i in range(nRows):
+            for j in range(nCols):
+
+                key = (mainVesselDensArr[i], gasBoxDensArr[j])
+
+                if key not in dataDict:
+                    continue
+
+                _, simTimeArr, expTimeArr, _ = dataDict[key]
+
+                axWidth = scale * np.ptp(expTimeArr) * 1e3 / figWidthIn
+                axHeight = scale * np.ptp(simTimeArr) * 1e3 / figHeightIn
+
+                # Centered horizontally and sat on the bottom of the cell, so that every
+                # simulation starts from the same baseline
+                cell = cells[i][j]
+                axs[i, j].set_position([cell.x0 + 0.5*(cell.width - axWidth), cell.y0,
+                                        axWidth, axHeight])
+
+                axs[i, j].set_xlim(expTimeArr.min()*1e3, expTimeArr.max()*1e3)
+                axs[i, j].set_ylim(simTimeArr.min()*1e3, simTimeArr.max()*1e3)
+
+        # Offsets from the grid in points, converted to figure fractions. Figure text is used
+        # rather than annotations so that bbox_inches='tight' keeps it in the saved image.
+        figWidthPts, figHeightPts = 72 * figWidthIn, 72 * figHeightIn
+
+        # Label the rows and columns with the neutral densities. The units are in the
+        # row and column titles, so they are left off the individual labels.
+        for j in range(nCols):
+            fig.text(0.5*(cells[0][j].x0 + cells[0][j].x1), cells[0][j].y1 + 10/figHeightPts,
+                     density_label(gasBoxDensArr[j], units=False),
+                     ha = 'center', va = 'bottom', fontsize = 24)
+        for i in range(nRows):
+            fig.text(cells[i][0].x0 - 60/figWidthPts, 0.5*(cells[i][0].y0 + cells[i][0].y1),
+                     density_label(mainVesselDensArr[i], units=False),
+                     ha = 'right', va = 'center', fontsize = 24, rotation = 90)
+
+        # The titles are centered on the grid of sub-plots
+        topPos = cells[0][0]
+        gridCenterX = 0.5 * (topPos.x0 + cells[0][-1].x1)
+        gridCenterY = 0.5 * (cells[-1][0].y0 + topPos.y1)
+
+        # Column title, above the column labels
+        fig.text(gridCenterX, topPos.y1 + 50/figHeightPts,
+                 r'Gas Box Density [$\mathrm{m^{-3}}$]',
+                 ha = 'center', va = 'bottom', fontsize = 26)
+
+        # Row title, to the left of the row labels
+        fig.text(topPos.x0 - 100/figWidthPts, gridCenterY,
+                 r'Main Vessel Density [$\mathrm{m^{-3}}$]',
+                 ha = 'right', va = 'center', fontsize = 26, rotation = 90)
+
+        # Figure title, above the column title
+        fig.text(gridCenterX, topPos.y1 + 95/figHeightPts,
+                 f'{shotnum} vs. Simulations using {metricName}',
+                 ha = 'center', va = 'bottom', fontsize = 30)
 
         # Single shared colorbar for all the sub-plots
         if pltObj is not None:
@@ -1964,18 +2100,23 @@ def plot_simulation_scan_panel(shotnum, metric=cm.normalized_mean_abs_error, sim
             cbar = fig.colorbar(pltObj, cax=cbarAx)
             cbar.locator = ticker.LogLocator(base=10.0, numticks=10)
             cbar.update_ticks()
-            cbar.set_label(metricName, rotation=90)
+            cbar.ax.tick_params(labelsize=20)
+            # The metric is named in the figure title
+            cbar.set_label('Comparison', rotation=90, fontsize=24)
 
         if saveplot:
 
             # Make a directory to store plots if it does not already exist
-            saveDir = simulationScanDir + 'plots'
+            saveDir = '/home/sanwalka/shinethru/plots'
             os.makedirs(saveDir, exist_ok=True)
 
             # The '_extension' suffix keeps this separate from the panel plot of the
             # unextended simulations
             print(f'Saving the panel plot to {saveDir}/{shotnum}_scan_panel_{metricName}_extension.png')
-            plt.savefig(saveDir + f'/{shotnum}_scan_panel_{metricName}_extension.png', dpi=300)
+            # The titles sit outside the area tight_layout() arranges, so the saved image is
+            # cropped to include them
+            plt.savefig(saveDir + f'/{shotnum}_scan_panel_{metricName}_extension.png', dpi=300,
+                        bbox_inches='tight')
 
         plt.show()
 
@@ -2065,7 +2206,7 @@ if __name__ == '__main__':
         detDictList = pickle.load(pickleFile)
 
     # Simulation directory
-    simulationName = 'nneut_2e17_gb_2e17_NBI_800kW_ECH_0kW'
+    simulationName = 'nneut_2e17_gb_2e17_NBI_800kW_ECH_0kW_ionDrrOn'
     # Shot number
     shotnum = 260426037
     shotnum = 260709060
@@ -2084,8 +2225,8 @@ if __name__ == '__main__':
 
     # Compare simulation to experiment. The AXUV window sets the experimental timebase of the
     # comparison, as the extension is only defined where AXUV measured a plasma radius.
-    comparisonArr, simTimeArr, expTimeArr = compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=False, makeplot=True, saveplot=True,
-                                                                             axuvTMin=3e-3, axuvTMax=12e-3)
+    # comparisonArr, simTimeArr, expTimeArr = compare_simulation_and_experiment(simulationName, shotnum, redoAnalysis=False, makeplot=True, saveplot=True,
+    #                                                                          axuvTMin=3e-3, axuvTMax=8e-3)
 
     # Compare the experiment to all simulations
     # compare_all_simulations(shotnum, 

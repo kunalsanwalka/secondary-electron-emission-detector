@@ -17,7 +17,7 @@ from scipy.stats import binned_statistic
 import cql3d_radial_profiles
 
 from cql3d_radial_profiles import load_eqdsk_flux
-from cql3d_vs_data import find_valid_time_slices, maxIonDensity
+from cql3d_vs_data import find_valid_time_slices, maxIonDensity, parse_simulation_name, density_label
 
 # Global variable to store the simulation scan directory
 global simulationScanDir
@@ -107,6 +107,29 @@ def average_down(timeArr, values, rateKHz):
 
     return centres[keep], means[keep]
 
+def axuv_data_files(shotnum, diodeArrayNum):
+    """
+    Find the AXUV NPZ files in the data directory for the given shot and diode array.
+
+    Parameters
+    ----------
+    shotnum : int
+        The shot number.
+    diodeArrayNum : int
+        The diode array, i.e. 1 for DIODEARRAY1.
+
+    Returns
+    -------
+    filenameList : list of Path
+        The matching files, with the original before any duplicates of it. Empty if the AXUV
+        data for the shot has not been generated yet.
+    """
+
+    # The data directory can hold duplicates of the same diode (e.g. ' copy' files), which
+    # sort after the original they copy
+    return sorted(axuvDataDir.glob(f'AXUV_results*{shotnum}*DA{diodeArrayNum}*.npz'),
+                  key=lambda p: ('copy' in p.stem, p.name))
+
 def load_axuv_radius(shotnum, diodeArrayNum, rateKHz=10.0, tMin=None, tMax=None):
     """
     Load the plasma radius vs. time measured by AXUV for the given shot.
@@ -139,10 +162,7 @@ def load_axuv_radius(shotnum, diodeArrayNum, rateKHz=10.0, tMin=None, tMax=None)
         1D array of the plasma radius. [m]
     """
 
-    # The data directory can hold duplicates of the same diode (e.g. ' copy' files), which
-    # sort after the original they copy
-    filenameList = sorted(axuvDataDir.glob(f'AXUV_results*{shotnum}*DA{diodeArrayNum}*.npz'),
-                          key=lambda p: ('copy' in p.stem, p.name))
+    filenameList = axuv_data_files(shotnum, diodeArrayNum)
 
     if len(filenameList) == 0:
         raise FileNotFoundError(f'No AXUV data for shot {shotnum}, DA{diodeArrayNum} in {axuvDataDir}')
@@ -720,7 +740,7 @@ def extend_2d_density(simulationName, shotnum, diodeArrayNum, simTimeToPlot,
                       rateKHz=10.0, tanhSteepness=4.0, tMin=None, tMax=None,
                       redoAnalysis=False,
                       densCmap='inferno', extCmap='viridis', fluxColor='white',
-                      numFluxSurfaces=15):
+                      numFluxSurfaces=15, saveplot=False):
     """
     Build a 2D (R, Z) density profile that keeps the simulated density and adds the extension
     out to the AXUV plasma radius onto it.
@@ -781,6 +801,11 @@ def extend_2d_density(simulationName, shotnum, diodeArrayNum, simTimeToPlot,
     numFluxSurfaces : int
         Number of flux surfaces to plot.
         Default is 15.
+    saveplot : bool
+        Save the plot in /home/sanwalka/shinethru/plots/ as
+        f'{shotnum}_{simulationName}_tsim{TSIM}ms_texp{TEXP}ms_extension_method.png'.
+        Only used if makeplot is True.
+        Default is False.
 
     Returns
     -------
@@ -837,22 +862,79 @@ def extend_2d_density(simulationName, shotnum, diodeArrayNum, simTimeToPlot,
         else:
             expTimeIdx = np.argmin(np.abs(axuvTimes - expTimeToPlot))
 
-        fig = plt.figure(figsize=(14, 6), tight_layout=True)
-        fig.suptitle(simulationName)
-        ax = fig.add_subplot(1, 1, 1)
+        fig, (axMid, ax) = plt.subplots(2, 1, figsize=(14, 9), tight_layout=True)
+
+        # Label the simulation by its neutral densities, falling back on its name if they
+        # cannot be parsed out of it
+        mainVesselDens, gasBoxDens = parse_simulation_name(simulationName)
+        if mainVesselDens is not None:
+            simLabel = (f'Gas Box {density_label(gasBoxDens)}, '
+                        f'Main Vessel {density_label(mainVesselDens)}')
+        else:
+            simLabel = simulationName
+
+        fig.suptitle(f'{simLabel}\nwith {shotnum} AXUV at '
+                     rf't$_{{Sim}}$ = {times[simTimeIdx]*1e3:.4g} ms and '
+                     rf't$_{{Exp}}$ = {axuvTimes[expTimeIdx]*1e3:.4g} ms')
 
         # Axial and radial extent of the plot
         zLim = (0, 0.8)
         rLim = (0, 1.05 * np.max(axuvRadius))
 
+        # Both colorbars and the midplane profile share one power of 10, set by the peak
+        # simulated density, so that they can be read against each other
+        densExp = int(np.floor(np.log10(np.max(densSim))))
+        densScale = 10.0**densExp
+        densUnits = rf'[10$^{{{densExp}}}$ m$^{{-3}}$]'
+
+        # Rounded colorbar ticks, kept within the range of the colorbar
+        def round_ticks(vmax):
+            ticks = mpl.ticker.MaxNLocator(nbins=5).tick_values(0, vmax)
+            return ticks[ticks <= vmax]
+
+        # Line colors of the midplane profile, taken from the colormaps of the contour plots
+        simColor = mpl.colormaps[densCmap](0.6)
+        extColor = mpl.colormaps[extCmap](0.6)
+
+        #### Midplane profile
+
+        # The outermost simulated point is prepended so that the extension joins onto the
+        # simulated profile
+        rExtMid = np.concatenate([[solrz[-1, 0]], rExtGrid])
+        densExtMidPlot = np.concatenate([[densSim[-1, 0]], densExtMid[expTimeIdx]])
+
+        axMid.plot(solrz[:, 0], densSim[:, 0]/densScale,
+                   color=simColor,
+                   linewidth=3,
+                   label='Simulation')
+        axMid.plot(rExtMid, densExtMidPlot/densScale,
+                   color=extColor,
+                   linewidth=3,
+                   label='AXUV extension')
+        axMid.axvline(axuvRadius[expTimeIdx],
+                      color='black',
+                      linestyle='--',
+                      linewidth=1,
+                      label=f'AXUV plasma radius (DA{diodeArrayNum}), '
+                            f'a = {axuvRadius[expTimeIdx]*1e2:.4g} cm')
+
+        axMid.set_xlim(rLim)
+        axMid.set_ylim(0, None)
+
+        axMid.set_xlabel('R [m]')
+        axMid.set_ylabel(r'Midplane n$_i$ ' + densUnits)
+        axMid.legend(loc='upper left')
+        axMid.grid(True)
+
         #### Simulated density
 
-        simLevels = np.linspace(0, np.max(densSim), 100)
+        simMax = np.max(densSim) / densScale
+        simLevels = np.linspace(0, simMax, 100)
 
-        simObj = ax.contourf(solzz, solrz, densSim, levels=simLevels, cmap=densCmap)
+        simObj = ax.contourf(solzz, solrz, densSim/densScale, levels=simLevels, cmap=densCmap)
 
-        simCbar = fig.colorbar(simObj, ax=ax)
-        simCbar.set_label(r'Simulation n$_i$ [m$^{-3}$]')
+        simCbar = fig.colorbar(simObj, ax=ax, ticks=round_ticks(simMax))
+        simCbar.set_label(r'Simulation n$_i$ ' + densUnits)
 
         #### Extension
 
@@ -865,12 +947,14 @@ def extend_2d_density(simulationName, shotnum, diodeArrayNum, simTimeToPlot,
         # Nothing is drawn outside the plasma radius of this timestep
         densExtPlot = np.ma.masked_less_equal(densExtPlot, 0)
 
-        extLevels = np.linspace(0, np.max(densExtMid[expTimeIdx]), 100)
+        extMax = np.max(densExtMid[expTimeIdx]) / densScale
+        extLevels = np.linspace(0, extMax, 100)
 
-        extObj = ax.contourf(zExtPlot, rExtPlot, densExtPlot, levels=extLevels, cmap=extCmap)
+        extObj = ax.contourf(zExtPlot, rExtPlot, densExtPlot/densScale, levels=extLevels,
+                             cmap=extCmap)
 
-        extCbar = fig.colorbar(extObj, ax=ax)
-        extCbar.set_label(r'AXUV extension n$_i$ [m$^{-3}$]')
+        extCbar = fig.colorbar(extObj, ax=ax, ticks=round_ticks(extMax))
+        extCbar.set_label(r'AXUV extension n$_i$ ' + densUnits)
 
         #### Flux surfaces
 
@@ -883,9 +967,13 @@ def extend_2d_density(simulationName, shotnum, diodeArrayNum, simTimeToPlot,
 
         ax.set_xlabel('Z [m]')
         ax.set_ylabel('R [m]')
-        ax.set_title(f'Simulation t = {times[simTimeIdx]*1e3:.4g} ms\n'
-                     f'Shot {shotnum} DA{diodeArrayNum} t = {axuvTimes[expTimeIdx]*1e3:.4g} ms, '
-                     f'a = {axuvRadius[expTimeIdx]*1e2:.4g} cm')
+
+        if saveplot:
+            savePath = (f'/home/sanwalka/shinethru/plots/{shotnum}_{simulationName}_'
+                        f'tsim{times[simTimeIdx]*1e3:.4g}ms_texp{axuvTimes[expTimeIdx]*1e3:.4g}ms_'
+                        f'extension_method.png')
+            plt.savefig(savePath, dpi=600)
+            print(f'Saved plot to {savePath}')
 
         plt.show()
 
@@ -1093,7 +1181,7 @@ def extend_2d_density_all_times(simulationName, shotnum, diodeArrayNum,
 
 if __name__ == '__main__':
 
-    simName = 'nneut_1e18_gb_2e17_NBI_800kW_ECH_0kW_ionDrrOn'
+    simName = 'nneut_2e17_gb_2e17_NBI_800kW_ECH_0kW_ionDrrOn'
     shotnum = 260426037
     diodeArrayNum = 1
 
@@ -1111,13 +1199,14 @@ if __name__ == '__main__':
     #                               cmap='viridis',
     #                               tMin=tMin, tMax=tMax)
 
-    # dens, solrz, solzz, time = extend_2d_density(simName, shotnum, diodeArrayNum, simTimeToPlot,
-    #                                              makeplot=True,
-    #                                              expTimeToPlot=expTimeToPlot,
-    #                                              tMin=tMin, tMax=tMax)
+    dens, solrz, solzz, time = extend_2d_density(simName, shotnum, diodeArrayNum, simTimeToPlot,
+                                                 makeplot=True,
+                                                 saveplot=True,
+                                                 expTimeToPlot=expTimeToPlot,
+                                                 tMin=tMin, tMax=tMax)
 
-    dens, solrz, solzz, expTime, simTime = extend_2d_density_all_times(simName, shotnum, diodeArrayNum,
-                                                                       tMin=tMin, tMax=tMax,
-                                                                       makeplot=True,
-                                                                       simTimeToPlot=simTimeToPlot,
-                                                                       expTimeToPlot=expTimeToPlot)
+    # dens, solrz, solzz, expTime, simTime = extend_2d_density_all_times(simName, shotnum, diodeArrayNum,
+    #                                                                    tMin=tMin, tMax=tMax,
+    #                                                                    makeplot=True,
+    #                                                                    simTimeToPlot=simTimeToPlot,
+    #                                                                    expTimeToPlot=expTimeToPlot)

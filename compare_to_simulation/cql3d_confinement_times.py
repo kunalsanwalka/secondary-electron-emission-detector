@@ -7,9 +7,11 @@ import pickle
 import xarray as xr
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 
 from kn1dc_parser import generate_filename_list, time_dep_source_rate, disambiguate_source_rate
 import extend_cql3d_with_axuv as eca
+from cql3d_vs_data import parse_simulation_name, density_label
 
 # Global variable to store the simulation scan directory
 simulationScanDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/withRadialDiff/'
@@ -373,25 +375,37 @@ def plot_taup_density_source(simName, shotnum, timeToPlot, timeToPlotExp, diodeA
     rhoH, SionMV, SionGBMid, timeSource = disambiguate_source_rate(simName, timeToPlot, makeplot=False)
 
     fig = plt.figure(figsize=(10, 14), tight_layout=True)
-    fig.suptitle(simName, fontsize=16)
 
     # Confinement time
     ax1 = fig.add_subplot(3, 1, 1)
-    ax1.plot(rArr2D[0], tauPCQL3D[tauPIdx]*1e3, color='tab:red', linewidth=3)
-    ax1.set_ylabel('Confinement Time [ms]')
+    ax1.plot(rArr2D[0], tauPCQL3D[tauPIdx]*1e3, color='k', linewidth=3)
+    ax1.set_ylabel(r'$\tau_p$ [ms]')
     ax1.set_ylim(0, None)
-    ax1.set_title(f'tauc_code, Time = {timeArrCQL3D[tauPIdx]*1e3:.2f} ms')
+    ax1.set_title(f'Shot #{shotnum}', loc='right')
 
-    # Midplane density
+    # Label the top panel with the times and neutral densities of the simulation
+    paramText = (r'$t_{Exp}$' + f' = {extData["axuvTimes"][axuvIdx]*1e3:.2f} ms\n'
+                 r'$t_{Sim}$' + f' = {timeArrCQL3D[tauPIdx]*1e3:.2f} ms')
+    mainVesselDens, gasBoxDens = parse_simulation_name(simName)
+    if mainVesselDens is not None:
+        paramText += (f'\nGas Box '+r'$n_n$'+f': {density_label(gasBoxDens)}\n'
+                      f'Main Vessel '+r'$n_n$'+f': {density_label(mainVesselDens)}')
+    ax1.text(0.02, 0.05, paramText,
+             transform=ax1.transAxes,
+             ha='left', va='bottom',
+             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    # Midplane density, colored the same as in extend_2d_density() in extend_cql3d_with_axuv.py
+    simColor = mpl.colormaps['inferno'](0.6)
+    extColor = mpl.colormaps['viridis'](0.6)
+
     ax2 = fig.add_subplot(3, 1, 2, sharex=ax1)
-    ax2.plot(rSim, densSimMid, label='CQL3D', color='tab:purple', linewidth=3)
-    ax2.plot(rExt, densExtMid, label=f'AXUV DA{diodeArrayNum} extension',
-             color='tab:purple', linewidth=3, linestyle='--')
-    ax2.set_ylabel(r'n$_i$ [m$^{-3}$]')
+    ax2.plot(rSim, densSimMid, label='CQL3D', color=simColor, linewidth=3)
+    ax2.plot(rExt, densExtMid, label='AXUV extension',
+             color=extColor, linewidth=3, linestyle='--')
+    ax2.set_ylabel(r'Midplane n$_i$ [m$^{-3}$]')
     ax2.set_ylim(0, None)
     ax2.legend()
-    ax2.set_title(f'Midplane Density, Time = {times[densIdx]*1e3:.2f} ms\n'
-                  f'Shot {shotnum} AXUV at {extData["axuvTimes"][axuvIdx]*1e3:.2f} ms')
 
     # Disambiguated source rates
     ax3 = fig.add_subplot(3, 1, 3, sharex=ax1)
@@ -400,7 +414,6 @@ def plot_taup_density_source(simName, shotnum, timeToPlot, timeToPlotExp, diodeA
     ax3.set_ylabel('Source Rate [#/s]')
     ax3.set_yscale('log')
     ax3.legend()
-    ax3.set_title(f'Disambiguated Source Rate (z = 0 m), Time = {timeSource*1e3:.2f} ms')
 
     ax1.set_xlim(0, xMax)
 
@@ -422,7 +435,7 @@ def plot_taup_density_source(simName, shotnum, timeToPlot, timeToPlotExp, diodeA
 
 if __name__ == '__main__':
 
-    simName = 'nneut_3e16_gb_1e18_NBI_800kW_ECH_0kW_ionDrrOn'
+    simName = 'nneut_2e17_gb_2e17_NBI_800kW_ECH_0kW_ionDrrOn'
     
     # Times to plot (in seconds)
     timesToPlotSim = np.array([3]) * 1e-3

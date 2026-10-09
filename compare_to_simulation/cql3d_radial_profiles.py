@@ -12,6 +12,7 @@ import yaml
 from cql3d_vs_data import load_detector_dictionary, time_dependent_see_detector, load_experimental_data
 from cql3d_vs_data import time_dependent_see_detector_extended
 from cql3d_vs_data import find_simulation_names, find_valid_time_slices, maxIonDensity
+from cql3d_vs_data import parse_simulation_name, density_label
 
 # Global variable to store the simulation scan directory
 global simulationScanDir
@@ -359,8 +360,6 @@ def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPl
     ax2.set_xlim(-xLim, xLim)
     ax2.set_xlabel('Radius [m]')
 
-    ax2.legend(title='Time [ms]')
-
     if showPlot:
         plt.show()
 
@@ -447,7 +446,7 @@ def plot_radial_and_synthetic_with_thomson(simulationName, shotnum, timesToPlotS
     ax1.autoscale_view(scalex=False)
     ax1.set_ylim(0, None)
 
-    ax1.legend()
+    ax1.legend(loc='lower left')
 
     # Flip the panels so the synthetic diagnostic is on top and the radial profile with the
     # Thomson data is on the bottom
@@ -455,9 +454,24 @@ def plot_radial_and_synthetic_with_thomson(simulationName, shotnum, timesToPlotS
     ax1.set_subplotspec(gs[1])
     ax2.set_subplotspec(gs[0])
 
-    # Move the title to the new top panel and the radius axis to the new bottom panel
-    ax2.set_title(ax1.get_title())
+    # Replace the simulation name title with the shot number on the new top panel
     ax1.set_title('')
+    ax2.set_title(f'Shot #{shotnum}', loc='right')
+
+    # Label the top panel with the neutral densities of the simulation
+    mainVesselDens, gasBoxDens = parse_simulation_name(simulationName)
+    if mainVesselDens is not None:
+        densText = (f'Gas Box '+r'$n_n$'+f': {density_label(gasBoxDens)}\n'
+                    f'Main Vessel '+r'$n_n$'+f': {density_label(mainVesselDens)}')
+        ax2.text(0.98, 0.05, densText,
+                 transform=ax2.transAxes,
+                 ha='right', va='bottom',
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    # Label the simulated and experimental signals with their times
+    ax2.legend(loc='lower left')
+
+    # Move the radius axis to the new bottom panel
 
     xLim = ax2.get_xlim()
     ax1.xaxis.set_major_locator(mpl.ticker.AutoLocator())
@@ -467,7 +481,7 @@ def plot_radial_and_synthetic_with_thomson(simulationName, shotnum, timesToPlotS
     ax2.set_xlabel('')
 
     if saveplot:
-        savePath = f'/home/sanwalka/shinethru/plots/{simulationName}_{shotnum}_withThomsonComparison.png'
+        savePath = f'/home/sanwalka/shinethru/plots/{shotnum}_{simulationName}_withThomsonComparison.png'
         plt.savefig(savePath, dpi=600)
         print(f'Saved plot to {savePath}')
 
