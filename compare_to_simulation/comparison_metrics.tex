@@ -1,0 +1,114 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+
+\title{Comparison Metrics for the Synthetic SEE Diagnostic}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+These are the metrics in \texttt{comparison\_metrics.py}. Each one compares the synthetic SEE
+diagnostic (CQL3D + KN1D) with the experimental line-integrated density for one pair of
+simulation and experimental times.
+
+\section*{Notation}
+
+\begin{tabular}{ll}
+  $N$                       & number of chords (detectors) \\
+  $E_i,\ S_i$               & experimental and simulated line-integrated density on chord $i$ [m$^{-2}$] \\
+  $\sigma_i$                & experimental error bar on chord $i$ [m$^{-2}$] \\
+  $b_i$                     & impact parameter of chord $i$, with $b_1 < b_2 < \dots < b_N$ [m] \\
+  $\epsilon_{\mathrm{sys}}$ & relative systematic error (\texttt{relSysErr}) \\
+  $n_{\mathrm{floor}}$      & density floor (\texttt{densFloor}) [m$^{-2}$]
+\end{tabular}
+
+\section*{Helper quantities}
+
+The total error bar (\texttt{\_total\_sigma}) and the corresponding weights are
+\begin{equation}
+  \sigma_{\mathrm{tot},i} = \sqrt{\sigma_i^2 + \left(\epsilon_{\mathrm{sys}} E_i\right)^2},
+  \qquad
+  w_i = \frac{1}{\sigma_{\mathrm{tot},i}^2}.
+\end{equation}
+
+The error-weighted best-fit scale factor (\texttt{\_scale\_fit}) minimizes
+$\sum_i w_i (E_i - \alpha S_i)^2$, giving
+\begin{equation}
+  \alpha = \frac{\sum_{i=1}^{N} w_i\, E_i S_i}{\sum_{i=1}^{N} w_i\, S_i^2}.
+\end{equation}
+
+For a profile $L(b)$ sampled at the chords, integrals over $b$ are evaluated with the
+trapezoidal rule on $[b_1, b_N]$. The centroid and RMS width (\texttt{\_profile\_width}) are
+\begin{equation}
+  \bar{b} = \frac{\int_{b_1}^{b_N} b\, L(b)\,\mathrm{d}b}{\int_{b_1}^{b_N} L(b)\,\mathrm{d}b},
+  \qquad
+  W[L] = \left[\frac{\int_{b_1}^{b_N} \left(b - \bar{b}\right)^2 L(b)\,\mathrm{d}b}
+                    {\int_{b_1}^{b_N} L(b)\,\mathrm{d}b}\right]^{1/2}.
+\end{equation}
+
+\section*{Metrics}
+
+Every metric is $\ge 0$. Lower is better, and $0$ is a perfect match. The one exception is the
+best-fit scale factor, where $1$ is a perfect match.
+
+\begin{align}
+  % normalized_mean_abs_error
+  \mathcal{M}_{\mathrm{NMAE}}
+    &= \frac{\frac{1}{N}\sum_{i=1}^{N} \left|E_i - S_i\right|}
+            {\frac{1}{2}\left(\frac{1}{N}\sum_{i=1}^{N} E_i + \frac{1}{N}\sum_{i=1}^{N} S_i\right)}
+     = \frac{2\sum_{i} \left|E_i - S_i\right|}{\sum_{i} \left(E_i + S_i\right)}
+     \in [0, 2], \\[6pt]
+  % log_ratio_rms
+  \mathcal{M}_{\mathrm{log}}
+    &= \left[\frac{1}{N}\sum_{i=1}^{N}
+       \ln^2\!\left(\frac{\max\!\left(S_i,\, n_{\mathrm{floor}}\right)}
+                         {\max\!\left(E_i,\, n_{\mathrm{floor}}\right)}\right)\right]^{1/2}, \\[6pt]
+  % reduced_chi_squared
+  \chi^2_{\nu}
+    &= \frac{1}{N}\sum_{i=1}^{N} \left(\frac{E_i - S_i}{\sigma_{\mathrm{tot},i}}\right)^2, \\[6pt]
+  % best_fit_scale_factor
+  \mathcal{M}_{\alpha}
+    &= \alpha \qquad (\text{perfect match at } \alpha = 1), \\[6pt]
+  % amplitude_mismatch
+  \mathcal{M}_{\mathrm{amp}}
+    &= \left|\ln \alpha\right|, \\[6pt]
+  % shape_mismatch
+  \mathcal{M}_{\mathrm{shape}}
+    &= \frac{1}{N-1}\sum_{i=1}^{N} \left(\frac{E_i - \alpha S_i}{\sigma_{\mathrm{tot},i}}\right)^2, \\[6pt]
+  % width_mismatch
+  \mathcal{M}_{W}
+    &= \left|\ln\frac{W[S]}{W[E]}\right|, \\[6pt]
+  % inventory_mismatch
+  \mathcal{M}_{I}
+    &= \left|\ln\frac{\int_{b_1}^{b_N} S(b)\,\mathrm{d}b}{\int_{b_1}^{b_N} E(b)\,\mathrm{d}b}\right|.
+\end{align}
+
+The functions in \texttt{comparison\_metrics.py} that correspond to each metric are
+\begin{center}
+\begin{tabular}{ll}
+  $\mathcal{M}_{\mathrm{NMAE}}$  & \texttt{normalized\_mean\_abs\_error} \\
+  $\mathcal{M}_{\mathrm{log}}$   & \texttt{log\_ratio\_rms} \\
+  $\chi^2_{\nu}$                 & \texttt{reduced\_chi\_squared} \\
+  $\mathcal{M}_{\alpha}$         & \texttt{best\_fit\_scale\_factor} \\
+  $\mathcal{M}_{\mathrm{amp}}$   & \texttt{amplitude\_mismatch} \\
+  $\mathcal{M}_{\mathrm{shape}}$ & \texttt{shape\_mismatch} \\
+  $\mathcal{M}_{W}$              & \texttt{width\_mismatch} \\
+  $\mathcal{M}_{I}$              & \texttt{inventory\_mismatch}
+\end{tabular}
+\end{center}
+
+\section*{Chord restriction}
+
+\texttt{restrict\_to\_chords} evaluates any of the metrics above using only the chords in
+\begin{equation}
+  \mathcal{C} = \left\{\, i \;:\; b_{\min} \le |b_i| \le b_{\max} \,\right\},
+\end{equation}
+so $N \to |\mathcal{C}|$, and all sums and integrals run over $\mathcal{C}$ only.
+$\mathcal{M}_W$ and $\mathcal{M}_I$ integrate across any gap in $\mathcal{C}$, so they should
+only be used with a contiguous range ($b_{\min} = 0$).
+
+\end{document}

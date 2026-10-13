@@ -9,7 +9,7 @@ import os
 import pickle
 import yaml
 
-from cql3d_vs_data import load_detector_dictionary, time_dependent_see_detector, load_experimental_data
+from cql3d_vs_data import load_detector_dictionary, time_dependent_see_detector, load_experimental_data, drop_suffix, defaultDetectorsToDrop
 from cql3d_vs_data import time_dependent_see_detector_extended
 from cql3d_vs_data import find_simulation_names, find_valid_time_slices, maxIonDensity
 from cql3d_vs_data import parse_simulation_name, density_label
@@ -90,7 +90,8 @@ def sim_dict_to_numpy(detDictList):
 def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPlotExp,
                               useExtension=False, diodeArrayNum=1, rateKHz=10.0,
                               tanhSteepness=4.0, axuvTMin=None, axuvTMax=None,
-                              redoAnalysis=False, showPlot=True):
+                              redoAnalysis=False, showPlot=True, detectorsToDrop=None, saveplot=False,
+                              axes=None):
     """
     Plot the midplane radial density profile and the synthetic diagnostic for the given times.
 
@@ -151,6 +152,18 @@ def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPl
     showPlot : bool
         Show the figure before returning. Set to False to add to the figure afterwards.
         Default is True.
+    detectorsToDrop : list of int
+        Indices (in detDictList) of the detectors with bad data, which are left out of the plot.
+        These are 0-indexed, i.e. detector 6 (no signal) is index 5.
+        Default is None, which discards defaultDetectorsToDrop (the railed detector, index 15).
+    saveplot : bool
+            Save the plot in /home/sanwalka/shinethru/plots/ as
+            f'{shotnum}_{simulationName}_withThomsonComparison{drop_suffix(detectorsToDrop)}_noThomson.png'.
+            Default is False.
+    axes : tuple of matplotlib.axes.Axes
+        (radial profile axis, synthetic diagnostic axis) to draw into instead of making a new
+        figure, e.g. to place this plot in a column of a larger figure.
+        Default is None, which makes a new figure.
 
     Returns
     -------
@@ -161,6 +174,9 @@ def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPl
     ax2 : matplotlib.axes.Axes
         The synthetic diagnostic axis.
     """
+
+    if detectorsToDrop is None:
+        detectorsToDrop = defaultDetectorsToDrop
 
     # All simulations are stored in the same directory
     simulationDir = simulationScanDir + simulationName + '/'
@@ -241,14 +257,14 @@ def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPl
         axuvTimeArr = None
 
     # Load the experimental data
-    detDictList = load_experimental_data(shotnum)
+    detDictList = load_experimental_data(shotnum, detectorsToDrop=detectorsToDrop)
     # Convert to numpy arrays for easy plotting
     expTimeArr, expDataArr, expDataSigmaArr, dataPresent = exp_dict_to_numpy(detDictList)
 
     # Impact Parameters
     impactParams = np.array([detDict['impact_param_vertical'] for detDict in detDictList]) / 1e3
 
-    # Remove data from the broken digitizer
+    # Remove data from the broken digitizer and the discarded detectors (see load_experimental_data())
     impactParams = impactParams[dataPresent]
     simDataArr = simDataArr[dataPresent]
 
@@ -259,23 +275,24 @@ def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPl
     expDataArr = expDataArr[sortIdx]
     expDataSigmaArr = expDataSigmaArr[sortIdx]
 
-    # 1st detector is broken
-    impactParams = impactParams[1:]
-    simDataArr = simDataArr[1:]
-    expDataArr = expDataArr[1:]
-    expDataSigmaArr = expDataSigmaArr[1:]
-
     # The radial grid reaches past the outermost detector, more so with the extension, so both
     # are taken into account to keep the two panels on the same x axis without clipping either
     xLim = 1.1 * max(np.max(np.abs(impactParams)), np.max(radialGrid))
 
-    # Create a figure for the radial profiles
-    fig = plt.figure(figsize=(12, 10), tight_layout=True)
+    if axes is None:
 
-    # Radial profile at the midplane
-    ax1 = fig.add_subplot(2, 1, 1)
-    # Synthetic diagnostic
-    ax2 = fig.add_subplot(2, 1, 2)
+        # Create a figure for the radial profiles
+        fig = plt.figure(figsize=(12, 10), tight_layout=True)
+
+        # Synthetic diagnostic on top
+        ax2 = fig.add_subplot(2, 1, 1)
+        # Radial profile at the midplane on the bottom
+        ax1 = fig.add_subplot(2, 1, 2)
+
+    else:
+
+        ax1, ax2 = axes
+        fig = ax1.figure
 
     # Plot the simulated radial profiles and synthetic diagnostics for the specified times
     for i in range(len(timesToPlotSim)):
@@ -346,19 +363,34 @@ def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPl
     ax1.set_ylabel(r'n$_i$ [m$^{-3}$]')
     ax1.set_ylim(0, None)
 
-    ax1.set_xticks([])
     ax1.set_xlim(-xLim, xLim)
+    ax1.set_xlabel('Radius [m]')
 
-    title = f'{simulationName} \n vs. Shot {shotnum}'
-    if useExtension:
-        title += f', AXUV DA{diodeArrayNum} extension'
-    ax1.set_title(title)
-    
     ax2.set_ylabel(r'$\int n_i \cdot dl$ [m$^{-2}$]')
     ax2.set_ylim(0, None)
 
+    ax2.set_xticks([])
     ax2.set_xlim(-xLim, xLim)
-    ax2.set_xlabel('Radius [m]')
+
+    ax2.set_title(f'Shot #{shotnum}', loc='right')
+
+    # Label the top panel with the neutral densities of the simulation
+    mainVesselDens, gasBoxDens = parse_simulation_name(simulationName)
+    if mainVesselDens is not None:
+        densText = (f'Gas Box '+r'$n_n$'+f': {density_label(gasBoxDens)}\n'
+                    f'Main Vessel '+r'$n_n$'+f': {density_label(mainVesselDens)}')
+        ax2.text(0.98, 0.05, densText,
+                 transform=ax2.transAxes,
+                 ha='right', va='bottom',
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    # Label the simulated and experimental signals with their times
+    ax2.legend(loc='lower left')
+
+    if saveplot:
+        savePath = f'/home/sanwalka/shinethru/plots/{shotnum}_{simulationName}_withThomsonComparison{drop_suffix(detectorsToDrop)}_noThomson.png'
+        fig.savefig(savePath, dpi=600)
+        print(f'Saved plot to {savePath}')
 
     if showPlot:
         plt.show()
@@ -404,10 +436,44 @@ def load_thomson_density(dataPath=thomsonDataPath):
 
     return radius[sortIdx], dens[sortIdx], densSigma[sortIdx], time
 
+def add_thomson_to_axis(ax):
+    """
+    Add the Thomson scattering density profile (loaded from thomsonDataPath) to a radial
+    profile axis made by plot_radial_and_synthetic().
+
+    The Thomson data is stored as R = |x|, so it is plotted on the positive radius side only.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        The radial profile axis.
+    """
+
+    # Load the Thomson scattering data
+    tsRadius, tsDens, tsDensSigma, tsTime = load_thomson_density()
+
+    ax.errorbar(tsRadius, tsDens,
+                yerr=tsDensSigma,
+                label=f'Thomson n$_e$, {tsTime*1e3:.2f} ms',
+                color='black',
+                fmt='o',
+                ms=10,
+                elinewidth=3)
+
+    # The y limits were fixed before the Thomson data was added, so rescale to fit its error bars
+    ax.set_autoscaley_on(True)
+    ax.relim()
+    ax.autoscale_view(scalex=False)
+    ax.set_ylim(0, None)
+
+    ax.legend(loc='lower left')
+
+    return
+
 def plot_radial_and_synthetic_with_thomson(simulationName, shotnum, timesToPlotSim, timesToPlotExp,
                                            useExtension=False, diodeArrayNum=1, rateKHz=10.0,
                                            tanhSteepness=4.0, axuvTMin=None, axuvTMax=None,
-                                           redoAnalysis=False, saveplot=False):
+                                           redoAnalysis=False, saveplot=False, detectorsToDrop=None):
     """
     Same plot as plot_radial_and_synthetic(), with the Thomson scattering density profile
     (loaded from thomsonDataPath) added to the radial profile panel.
@@ -416,78 +482,117 @@ def plot_radial_and_synthetic_with_thomson(simulationName, shotnum, timesToPlotS
 
     Parameters
     ----------
-    See plot_radial_and_synthetic(), plus-
-    saveplot : bool
-        Save the plot in /home/sanwalka/shinethru/plots/ as
-        f'{simulationName}_{shotnum}_withThomsonComparison.png'.
-        Default is False.
+    See plot_radial_and_synthetic()
     """
+
+    if detectorsToDrop is None:
+        detectorsToDrop = defaultDetectorsToDrop
 
     fig, ax1, ax2 = plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPlotExp,
                                               useExtension=useExtension, diodeArrayNum=diodeArrayNum,
                                               rateKHz=rateKHz, tanhSteepness=tanhSteepness,
                                               axuvTMin=axuvTMin, axuvTMax=axuvTMax,
-                                              redoAnalysis=redoAnalysis, showPlot=False)
+                                              redoAnalysis=redoAnalysis, showPlot=False,
+                                              detectorsToDrop=detectorsToDrop)
 
-    # Load the Thomson scattering data
-    tsRadius, tsDens, tsDensSigma, tsTime = load_thomson_density()
-
-    ax1.errorbar(tsRadius, tsDens,
-                 yerr=tsDensSigma,
-                 label=f'Thomson n$_e$, {tsTime*1e3:.2f} ms',
-                 color='black',
-                 fmt='o',
-                 ms=10,
-                 elinewidth=3)
-
-    # The y limits were fixed before the Thomson data was added, so rescale to fit its error bars
-    ax1.set_autoscaley_on(True)
-    ax1.relim()
-    ax1.autoscale_view(scalex=False)
-    ax1.set_ylim(0, None)
-
-    ax1.legend(loc='lower left')
-
-    # Flip the panels so the synthetic diagnostic is on top and the radial profile with the
-    # Thomson data is on the bottom
-    gs = ax1.get_subplotspec().get_gridspec()
-    ax1.set_subplotspec(gs[1])
-    ax2.set_subplotspec(gs[0])
-
-    # Replace the simulation name title with the shot number on the new top panel
-    ax1.set_title('')
-    ax2.set_title(f'Shot #{shotnum}', loc='right')
-
-    # Label the top panel with the neutral densities of the simulation
-    mainVesselDens, gasBoxDens = parse_simulation_name(simulationName)
-    if mainVesselDens is not None:
-        densText = (f'Gas Box '+r'$n_n$'+f': {density_label(gasBoxDens)}\n'
-                    f'Main Vessel '+r'$n_n$'+f': {density_label(mainVesselDens)}')
-        ax2.text(0.98, 0.05, densText,
-                 transform=ax2.transAxes,
-                 ha='right', va='bottom',
-                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-    # Label the simulated and experimental signals with their times
-    ax2.legend(loc='lower left')
-
-    # Move the radius axis to the new bottom panel
-
-    xLim = ax2.get_xlim()
-    ax1.xaxis.set_major_locator(mpl.ticker.AutoLocator())
-    ax1.set_xlim(xLim)
-    ax1.set_xlabel(ax2.get_xlabel())
-    ax2.set_xticks([])
-    ax2.set_xlabel('')
+    add_thomson_to_axis(ax1)
 
     if saveplot:
-        savePath = f'/home/sanwalka/shinethru/plots/{shotnum}_{simulationName}_withThomsonComparison.png'
+        savePath = f'/home/sanwalka/shinethru/plots/{shotnum}_{simulationName}_withThomsonComparison{drop_suffix(detectorsToDrop)}.png'
         plt.savefig(savePath, dpi=600)
         print(f'Saved plot to {savePath}')
 
     plt.show()
 
     return
+
+def plot_profile_comparison(simName1, simName2, shotnum1, shotnum2, expTime1, expTime2,
+                            simTime1, simTime2, withThomson1=False, withThomson2=False,
+                            detectorsToDrop1=None, detectorsToDrop2=None,
+                            useExtension=False, diodeArrayNum=1, rateKHz=10.0,
+                            tanhSteepness=4.0, redoAnalysis=False, saveplot=False):
+    """
+    Plot two plot_radial_and_synthetic() figures side by side for comparison.
+
+    The left column is (simName1, shotnum1, simTime1, expTime1) and the right column is
+    (simName2, shotnum2, simTime2, expTime2). Each column is the same as the output of
+    plot_radial_and_synthetic(), or plot_radial_and_synthetic_with_thomson() if the
+    corresponding withThomson flag is set. Both columns share the same x axis and each row
+    shares the same y axis, so the two can be compared directly.
+
+    Parameters
+    ----------
+    simName1, simName2 : str
+        The names of the simulations.
+    shotnum1, shotnum2 : int
+        The shot numbers the experimental data is taken from.
+    expTime1, expTime2 : float or np.array
+        The experimental times at which to plot the measured signals. [s]
+    simTime1, simTime2 : float or np.array
+        The simulation times at which to plot the radial profiles. [s]
+    withThomson1, withThomson2 : bool
+        Add the Thomson scattering density profile to the radial profile panel.
+        Default is False.
+    detectorsToDrop1, detectorsToDrop2 : list of int
+        Indices of the detectors with bad data for each shot.
+        Default is None, which discards defaultDetectorsToDrop.
+    useExtension, diodeArrayNum, rateKHz, tanhSteepness, redoAnalysis :
+        Used for both columns. See plot_radial_and_synthetic().
+    saveplot : bool
+        Save the plot in /home/sanwalka/shinethru/plots/ as
+        f'{shotnum1}_{shotnum2}_profile_comparison.png'.
+        Default is False.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The figure.
+    axs : np.array of matplotlib.axes.Axes
+        [row x column] axes. Row 0 is the synthetic diagnostic, row 1 the radial profile.
+    """
+
+    fig, axs = plt.subplots(2, 2, figsize=(20, 10), tight_layout=True)
+
+    columns = [(simName1, shotnum1, simTime1, expTime1, withThomson1, detectorsToDrop1),
+               (simName2, shotnum2, simTime2, expTime2, withThomson2, detectorsToDrop2)]
+
+    for col, (simName, shotnum, simTime, expTime, withThomson, detectorsToDrop) in enumerate(columns):
+
+        # Synthetic diagnostic on top, radial profile on the bottom
+        axRad, axSyn = axs[1, col], axs[0, col]
+
+        plot_radial_and_synthetic(simName, shotnum, np.atleast_1d(simTime), np.atleast_1d(expTime),
+                                  useExtension=useExtension, diodeArrayNum=diodeArrayNum,
+                                  rateKHz=rateKHz, tanhSteepness=tanhSteepness,
+                                  redoAnalysis=redoAnalysis, showPlot=False,
+                                  detectorsToDrop=detectorsToDrop, axes=(axRad, axSyn))
+
+        if withThomson:
+            add_thomson_to_axis(axRad)
+
+    # Same x axis for all panels, which are symmetric about 0
+    xLim = max(np.max(np.abs(ax.get_xlim())) for ax in axs.flat)
+    for ax in axs.flat:
+        ax.set_xlim(-xLim, xLim)
+
+    # Same y axis along each row
+    for row in range(2):
+        yMax = max(ax.get_ylim()[1] for ax in axs[row])
+        for ax in axs[row]:
+            ax.set_ylim(0, yMax)
+
+    # The y labels are shared along each row, so only keep them on the left
+    for ax in axs[:, 1]:
+        ax.set_ylabel('')
+
+    if saveplot:
+        savePath = f'/home/sanwalka/shinethru/plots/{shotnum1}_{shotnum2}_profile_comparison.png'
+        fig.savefig(savePath, dpi=600)
+        print(f'Saved plot to {savePath}')
+
+    plt.show()
+
+    return fig, axs
 
 def synthetic_interferometer(simulationName, makeplot=False):
 
@@ -787,9 +892,16 @@ def plot_2d_density_contour(simulationName, timeToPlot, densCmap='inferno',
 
 if __name__ == "__main__":
 
+    # Pre Ti gettering
     simName = 'nneut_3e16_gb_1e18_NBI_800kW_ECH_0kW_ionDrrOn'
-    simName = 'nneut_2e17_gb_2e17_NBI_800kW_ECH_0kW_ionDrrOn'
+    # simName = 'nneut_2e17_gb_2e17_NBI_800kW_ECH_0kW_ionDrrOn'
     shotnum = 260709061
+    detectorToDrop = [15]
+
+    # Post Ti gettering
+    simName = 'nneut_1e15_gb_1e18_NBI_800kW_ECH_0kW_ionDrrOn'
+    shotnum = 261012050
+    detectorToDrop = [9, 13, 15]
 
     # Times to plot (in seconds)
     timesToPlotSim = np.array([3]) * 1e-3
@@ -800,7 +912,27 @@ if __name__ == "__main__":
     # plot_radial_and_synthetic(simName, shotnum, timesToPlotSim, timesToPlotExp,
     #                           useExtension=True, diodeArrayNum=1, rateKHz=10.0)
 
-    plot_radial_and_synthetic_with_thomson(simName, shotnum, timesToPlotSim, timesToPlotExp,
-                                           useExtension=True, diodeArrayNum=1, rateKHz=10.0, 
-                                           saveplot=True)
+    # plot_radial_and_synthetic(simName, shotnum, timesToPlotSim, timesToPlotExp,
+    #                                        useExtension=True, diodeArrayNum=1, rateKHz=10.0, 
+    #                                        saveplot=True, detectorsToDrop=detectorToDrop)
     # times, synInf = synthetic_interferometer(simName, makeplot=True)
+
+    simName1 = 'nneut_3e16_gb_1e18_NBI_800kW_ECH_0kW_ionDrrOn'
+    simName2 = 'nneut_1e15_gb_1e18_NBI_800kW_ECH_0kW_ionDrrOn'
+    shotnum1 = 260709061
+    shotnum2 = 261012050
+    expTime1 = 7.83e-3
+    expTime2 = 7.83e-3
+    simTime1 = 3e-3
+    simTime2 = 3e-3
+    withThomson1 = True
+    withThomson2 = False
+    detectorsToDrop1 = [15]
+    detectorsToDrop2 = [9, 13, 15]
+    useExtension = True
+
+    plot_profile_comparison(simName1, simName2, shotnum1, shotnum2, expTime1, expTime2,
+                            simTime1, simTime2, withThomson1, withThomson2,
+                            detectorsToDrop1, detectorsToDrop2,
+                            useExtension, diodeArrayNum=1, rateKHz=10.0,
+                            tanhSteepness=4.0, redoAnalysis=False, saveplot=False)

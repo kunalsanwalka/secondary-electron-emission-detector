@@ -29,6 +29,10 @@ simulationScanDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/withRad
 # far above the ~2e20 m^-3 peak of the densest simulations.
 maxIonDensity = 1e21
 
+# Detectors discarded from the analysis when no others are specified, as their index in detDictList.
+# Index 15 (-13.68 cm, the most negative impact parameter) is railed/broken on every shot.
+defaultDetectorsToDrop = [15]
+
 def species_labels(filename):
     """
     This function generates an array with the labels for each 'general' species
@@ -1059,7 +1063,27 @@ def time_dependent_see_detector_extended(simulationName, shotnum, detDictList, d
 
     return syntheticSignal, simTime, expTime
 
-def comparison_filename(simulationName, shotnum, metricName):
+def drop_suffix(detectorsToDrop):
+    """
+    Filename suffix that records which detectors were discarded from the analysis.
+
+    Parameters
+    ----------
+    detectorsToDrop : list of int
+        Indices (in detDictList) of the discarded detectors.
+
+    Returns
+    -------
+    suffix : str
+        e.g. '_drop9-13-15', or '_dropnone' if no detectors were discarded.
+    """
+
+    if len(detectorsToDrop) == 0:
+        return '_dropnone'
+
+    return '_drop' + '-'.join(str(i) for i in sorted(set(detectorsToDrop)))
+
+def comparison_filename(simulationName, shotnum, metricName, detectorsToDrop):
     """
     Path the comparison between a shot and a simulation is saved to.
 
@@ -1071,6 +1095,8 @@ def comparison_filename(simulationName, shotnum, metricName):
         Shot number the simulation was compared against.
     metricName : str
         Name of the comparison metric, from cm.metric_name().
+    detectorsToDrop : list of int
+        Indices (in detDictList) of the detectors discarded from the comparison.
 
     Returns
     -------
@@ -1079,9 +1105,11 @@ def comparison_filename(simulationName, shotnum, metricName):
     """
 
     # The '_extension' suffix keeps these separate from the comparisons made against the
-    # unextended simulation, which are on a different experimental timebase
+    # unextended simulation, which are on a different experimental timebase. The discarded
+    # detectors are in the name so that comparisons made with different ones do not overwrite
+    # each other.
     return (simulationScanDir + simulationName
-            + f'/shot_comparison/{shotnum}_{metricName}_extension.npz')
+            + f'/shot_comparison/{shotnum}_{metricName}_extension{drop_suffix(detectorsToDrop)}.npz')
 
 def _branch_interpolate(srcRadii, srcDens, srcSigma, targetRadii, radiusTol=0.0):
     """
@@ -1164,11 +1192,10 @@ def symmetrize_experimental_data(detDictList, nInnerSkip=4, radiusTol=2e-3):
     only uses radius, so the weights are time independent and the averaging is done for every timestep in
     one vectorised operation.
 
-    Detectors are left untouched (and are excluded from the branch interpolation) when:
+    Detectors with no data (including the ones discarded by load_experimental_data()) take no part in the
+    symmetrization. Detectors are left untouched (and are excluded from the branch interpolation) when:
         - They are one of the nInnerSkip innermost detectors. Their up-down asymmetry comes from the
           viewing geometry, not from the plasma, so symmetrizing them would be wrong.
-        - They are the detector at the most negative impact parameter, which is railed/broken. This is the
-          same detector the rest of this module discards.
         - Their radius is outside the radial coverage of the opposite branch, so there is nothing to
           average against.
         - They are outside the time window covered by every detector in the symmetrization set.
@@ -1228,9 +1255,6 @@ def symmetrize_experimental_data(detDictList, nInnerSkip=4, radiusTol=2e-3):
 
     # Detectors excluded from the symmetrization
     excludedIdxList = set()
-
-    # The detector at the most negative impact parameter is railed/broken
-    excludedIdxList.add(validIdxList[int(np.argmin(impactParams))])
 
     # The innermost detectors are asymmetric because of the geometry, not the plasma
     innerOrder = np.argsort(np.abs(impactParams))
@@ -1314,7 +1338,7 @@ def symmetrize_experimental_data(detDictList, nInnerSkip=4, radiusTol=2e-3):
 
     return detDictList
 
-def load_experimental_data(shotnum, makeplot=False, symmetrize=True, nInnerSkip=4, radiusTol=2e-3):
+def load_experimental_data(shotnum, makeplot=False, symmetrize=True, nInnerSkip=4, radiusTol=2e-3, detectorsToDrop=None):
     """
     Calculates the experimental data for a given shot number.
 
@@ -1322,6 +1346,10 @@ def load_experimental_data(shotnum, makeplot=False, symmetrize=True, nInnerSkip=
     built on a purely radial CQL3D profile. By default the line-integrated density is therefore made
     up-down symmetric before it is returned (see symmetrize_experimental_data). The cached file on disk is
     never modified, only the data held in memory.
+
+    Detectors with bad data are discarded by setting their line-integrated density (and its uncertainty)
+    to None, the same as a detector with no signal. This is done before the symmetrization so that a bad
+    detector does not corrupt the detectors on the opposite half of the array.
 
     Parameters
     ----------
@@ -1339,12 +1367,19 @@ def load_experimental_data(shotnum, makeplot=False, symmetrize=True, nInnerSkip=
         Distance by which a detector is allowed to sit outside the radial coverage of the opposite half of
         the array and still be symmetrized. [m]
         Default is 2e-3.
+    detectorsToDrop : list of int
+        Indices (in detDictList) of the detectors with bad data, which are discarded from the analysis.
+        These are 0-indexed, i.e. detector 6 (no signal) is index 5.
+        Default is None, which discards defaultDetectorsToDrop (the railed detector, index 15).
 
     Returns
     -------
     detDictList : list
         List of dictionaries that contains the detector information AND the experimentally calculated line-integrated plasma density. [m^-2]
     """
+
+    if detectorsToDrop is None:
+        detectorsToDrop = defaultDetectorsToDrop
 
     savename = f'/home/sanwalka/shinethru/data/{shotnum}.pkl'
 
@@ -1371,6 +1406,14 @@ def load_experimental_data(shotnum, makeplot=False, symmetrize=True, nInnerSkip=
 
         with open(savename, 'rb') as file:
             detDictList = pickle.load(file)
+
+    # Discard the detectors with bad data
+    for i in detectorsToDrop:
+
+        print(f"Discarding detector index {i} ({detDictList[i]['impact_param_vertical']/10:.2f} cm)")
+
+        detDictList[i]['line_integrated_density'] = None
+        detDictList[i]['line_integrated_density_sigma'] = None
 
     # Remove the up-down asymmetry the synthetic diagnostic cannot capture
     if symmetrize:
@@ -1415,13 +1458,6 @@ def load_experimental_data(shotnum, makeplot=False, symmetrize=True, nInnerSkip=
         densList = [densList[i] for i in sortIdx]
         densErrList = [densErrList[i] for i in sortIdx]
         residualList = [residualList[i] for i in sortIdx]
-
-        # Remove the 1st detector (railed, broken)
-        impactParams = impactParams[1:]
-        timeArr2D = timeArr2D[1:]
-        densList = densList[1:]
-        densErrList = densErrList[1:]
-        residualList = residualList[1:]
 
         # Put all the data on the same time axis
         minFinalTime = 1e6
@@ -1509,7 +1545,7 @@ def load_experimental_data(shotnum, makeplot=False, symmetrize=True, nInnerSkip=
     return detDictList
 
 def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normalized_mean_abs_error, redoAnalysis=False, makeplot=False, saveplot=False, tExpStart=None, tExpStop=None,
-                                      diodeArrayNum=1, axuvTMin=None, axuvTMax=None, redoSynthetic=False):
+                                      diodeArrayNum=1, axuvTMin=None, axuvTMax=None, redoSynthetic=False, detectorsToDrop=None):
     """
     Compare the plasma density profiles between the CQL3D + KN1D simulation and the experimental result
 
@@ -1559,6 +1595,10 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
         Force the extended synthetic diagnostic to be recomputed as well. Use this when the
         extension itself changes, e.g. the AXUV data or the shape of the fall-off.
         Default is False.
+    detectorsToDrop : list of int
+        Indices (in detDictList) of the detectors with bad data, which are left out of the comparison.
+        These are 0-indexed, i.e. detector 6 (no signal) is index 5.
+        Default is None, which discards defaultDetectorsToDrop (the railed detector, index 15).
 
     Returns
     -------
@@ -1577,6 +1617,9 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
     # Name of the comparison metric, used to label the saved data and plots
     metricName = cm.metric_name(metric)
 
+    if detectorsToDrop is None:
+        detectorsToDrop = defaultDetectorsToDrop
+
     try:
 
         if redoAnalysis:
@@ -1585,7 +1628,7 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
         print(f'Trying to load the {metricName} comparison between shot {shotnum} and simulation {simulationName}')
 
         # Open the comparison file for the given shot
-        filename = comparison_filename(simulationName, shotnum, metricName)
+        filename = comparison_filename(simulationName, shotnum, metricName, detectorsToDrop)
 
         dataObj = np.load(filename)
 
@@ -1603,8 +1646,8 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
         print(e)
         print('Comparison data not saved. Generating it.')
 
-        # Load the experimental data
-        detDictList = load_experimental_data(shotnum)
+        # Load the experimental data, with the bad detectors discarded
+        detDictList = load_experimental_data(shotnum, detectorsToDrop=detectorsToDrop)
 
         # Load the simulation result, extended out to the AXUV plasma radius. The extension
         # changes with the experimental time, so the synthetic signal does too.
@@ -1673,25 +1716,19 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
         # [detector x simTime x expTime]
         simDataArr = np.transpose(syntheticSignal, (2, 0, 1))
 
-        # Remove the simulation data from the non-functioning detector
+        # Remove the simulation data from the non-functioning and discarded detectors
         simDataArr = simDataArr[dataPresent]
 
-        # Remove the non-functioning impact parameter
+        # Remove the non-functioning and discarded impact parameters
         impactParams = impactParams[dataPresent]
 
         # Sort the data based on impactParams
         sortIdx = np.argsort(impactParams)
-        
+
         impactParams = impactParams[sortIdx]
         simDataArr = simDataArr[sortIdx]
         expDataArr = expDataArr[sortIdx]
         expDataSigmaArr = expDataSigmaArr[sortIdx]
-
-        # Remove the 1st detector (railed/broken)
-        impactParams = impactParams[1:]
-        simDataArr = simDataArr[1:]
-        expDataArr = expDataArr[1:]
-        expDataSigmaArr = expDataSigmaArr[1:]
 
         # Compare every simulation time against every experimental time in one call.
         # The metrics reduce over the first (detector) axis and broadcast over the rest,
@@ -1710,7 +1747,7 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
         os.makedirs(simulationDir + 'shot_comparison', exist_ok=True)
 
         # Save the data
-        filename = comparison_filename(simulationName, shotnum, metricName)
+        filename = comparison_filename(simulationName, shotnum, metricName, detectorsToDrop)
 
         # The window is saved so that a narrower one can be cut out of this data later. No
         # limit is saved as NaN.
@@ -1778,7 +1815,7 @@ def compare_simulation_and_experiment(simulationName, shotnum, metric=cm.normali
             saveDir = '/home/sanwalka/shinethru/plots'
             os.makedirs(saveDir, exist_ok=True)
 
-            plt.savefig(saveDir+f'/{shotnum}_vs_{simulationName}_{metricName}_extension.png', dpi=300, bbox_inches='tight')
+            plt.savefig(saveDir+f'/{shotnum}_vs_{simulationName}_{metricName}_extension{drop_suffix(detectorsToDrop)}.png', dpi=300, bbox_inches='tight')
 
         plt.show()
 
@@ -1854,7 +1891,8 @@ def density_label(dens, units=True):
 
     return label
 
-def plot_simulation_scan_panel(shotnum, metric=cm.normalized_mean_abs_error, simNameList=None, tExpStart=None, tExpStop=None, vmin=None, vmax=None, saveplot=False):
+def plot_simulation_scan_panel(shotnum, metric=cm.normalized_mean_abs_error, simNameList=None, tExpStart=None, tExpStop=None, vmin=None, vmax=None, saveplot=False,
+                               detectorsToDrop=None):
     """
     Make a panel plot of the comparison between the experiment and every
     simulation in the scan.
@@ -1891,6 +1929,9 @@ def plot_simulation_scan_panel(shotnum, metric=cm.normalized_mean_abs_error, sim
     saveplot : bool
         Save the plot in /home/sanwalka/shinethru/plots/.
         Default is False.
+    detectorsToDrop : list of int
+        Indices (in detDictList) of the detectors that were discarded when the comparison data was computed.
+        Default is None, which is defaultDetectorsToDrop (the railed detector, index 15).
 
     Returns
     -------
@@ -1899,6 +1940,9 @@ def plot_simulation_scan_panel(shotnum, metric=cm.normalized_mean_abs_error, sim
 
     import matplotlib.ticker as ticker
     from matplotlib.colors import LogNorm
+
+    if detectorsToDrop is None:
+        detectorsToDrop = defaultDetectorsToDrop
 
     # Find all the simulation names
     if simNameList is None:
@@ -1922,7 +1966,7 @@ def plot_simulation_scan_panel(shotnum, metric=cm.normalized_mean_abs_error, sim
             print(f'Could not parse the neutral densities from {simulationName}. Skipping it.')
             continue
 
-        filename = comparison_filename(simulationName, shotnum, metricName)
+        filename = comparison_filename(simulationName, shotnum, metricName, detectorsToDrop)
 
         if not os.path.isfile(filename):
             print(f'No comparison data for {simulationName}. Skipping it.')
@@ -2112,10 +2156,10 @@ def plot_simulation_scan_panel(shotnum, metric=cm.normalized_mean_abs_error, sim
 
             # The '_extension' suffix keeps this separate from the panel plot of the
             # unextended simulations
-            print(f'Saving the panel plot to {saveDir}/{shotnum}_scan_panel_{metricName}_extension.png')
+            print(f'Saving the panel plot to {saveDir}/{shotnum}_scan_panel_{metricName}_extension{drop_suffix(detectorsToDrop)}.png')
             # The titles sit outside the area tight_layout() arranges, so the saved image is
             # cropped to include them
-            plt.savefig(saveDir + f'/{shotnum}_scan_panel_{metricName}_extension.png', dpi=300,
+            plt.savefig(saveDir + f'/{shotnum}_scan_panel_{metricName}_extension{drop_suffix(detectorsToDrop)}.png', dpi=300,
                         bbox_inches='tight')
 
         plt.show()
@@ -2123,7 +2167,7 @@ def plot_simulation_scan_panel(shotnum, metric=cm.normalized_mean_abs_error, sim
     return
 
 def compare_all_simulations(shotnum, metricList=None, makeIndividualPlots=True, makePanelPlot=True, redoAnalysis=False,
-                            diodeArrayNum=1, axuvTMin=None, axuvTMax=None, redoSynthetic=False):
+                            diodeArrayNum=1, axuvTMin=None, axuvTMax=None, redoSynthetic=False, detectorsToDrop=None):
     """
     Compare a given shot against every simulation in the scan directory, using every comparison metric.
 
@@ -2158,6 +2202,12 @@ def compare_all_simulations(shotnum, metricList=None, makeIndividualPlots=True, 
         Force the extended synthetic diagnostic to be recomputed for every simulation.
         This is only done for the first metric, as the synthetic data does not depend on it.
         Default is False.
+    detectorsToDrop : list of int
+        Indices (in detDictList) of the detectors with bad data, which are left out of the comparison,
+        e.g. [9, 13, 15] for the detectors at -5.24 cm, 0.55 cm and -13.68 cm.
+        These are 0-indexed, i.e. detector 6 (no signal) is index 5.
+        Default is None, which discards defaultDetectorsToDrop (the railed detector, index 15).
+        The comparisons are saved separately for each set of discarded detectors.
 
     Returns
     -------
@@ -2190,12 +2240,14 @@ def compare_all_simulations(shotnum, metricList=None, makeIndividualPlots=True, 
                                                         axuvTMax = axuvTMax,
                                                         # The synthetic data does not depend on
                                                         # the metric, so it is only redone once
-                                                        redoSynthetic = redoSynthetic and metricIdx == 0)
+                                                        redoSynthetic = redoSynthetic and metricIdx == 0,
+                                                        detectorsToDrop = detectorsToDrop)
 
         # Now that all the data is pre-computed, make the panel plot of the scan
         if makePanelPlot:
 
-            plot_simulation_scan_panel(shotnum, metric=metric, tExpStart=2.3e-3, tExpStop=12.5e-3, simNameList=simNameList, saveplot=True)
+            plot_simulation_scan_panel(shotnum, metric=metric, tExpStart=2.3e-3, tExpStop=12.5e-3, simNameList=simNameList, saveplot=True,
+                                       detectorsToDrop=detectorsToDrop)
 
     return
 
@@ -2210,6 +2262,8 @@ if __name__ == '__main__':
     # Shot number
     shotnum = 260426037
     shotnum = 260709060
+    shotnum = 261012050
+    detectorsToDrop = [9, 13, 15]  # Discard the detectors at -5.24 cm, 0.55 cm and -13.68 cm
 
     # Load the experimental data for a given shot
     # detDictList = load_experimental_data(shotnum, True)
@@ -2229,6 +2283,7 @@ if __name__ == '__main__':
     #                                                                          axuvTMin=3e-3, axuvTMax=8e-3)
 
     # Compare the experiment to all simulations
-    # compare_all_simulations(shotnum, 
-    #                         metricList=[cm.normalized_mean_abs_error],
-    #                         makeIndividualPlots=False, makePanelPlot=True, axuvTMin=3e-3, axuvTMax=12e-3)
+    compare_all_simulations(shotnum, 
+                            metricList=[cm.normalized_mean_abs_error],
+                            makeIndividualPlots=False, makePanelPlot=True, axuvTMin=3e-3, axuvTMax=12e-3,
+                            detectorsToDrop=detectorsToDrop, redoSynthetic=False)

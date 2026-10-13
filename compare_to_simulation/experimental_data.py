@@ -267,23 +267,23 @@ def add_resistance(detDictList):
     detDictList[3]['resistance'] = 1e3
     detDictList[4]['resistance'] = 1e3
     detDictList[5]['resistance'] = 'nc' # no signal for this detector
-    detDictList[6]['resistance'] = 1e3
+    detDictList[6]['resistance'] = 510
     detDictList[7]['resistance'] = 1e3
     detDictList[8]['resistance'] = 1e3
     detDictList[9]['resistance'] = 1e3
     detDictList[10]['resistance'] = 1e3
     detDictList[11]['resistance'] = 1e3
-    detDictList[12]['resistance'] = 1e3
-    detDictList[13]['resistance'] = 1e3
+    detDictList[12]['resistance'] = 510
+    detDictList[13]['resistance'] = 510
     detDictList[14]['resistance'] = 1e3
 
     # In vessel detectors
     detDictList[15]['resistance'] = 1e2
-    detDictList[16]['resistance'] = 1e2
+    detDictList[16]['resistance'] = 200
     detDictList[17]['resistance'] = 1e2
-    detDictList[18]['resistance'] = 1e2
-    detDictList[19]['resistance'] = 1e2
-    detDictList[20]['resistance'] = 1e2
+    detDictList[18]['resistance'] = 3e3
+    detDictList[19]['resistance'] = 1e3
+    detDictList[20]['resistance'] = 1e3
 
     return detDictList
 
@@ -907,16 +907,14 @@ def plot_raw_data():
     # Load the raw data into the detector dictionaries
     detDictList = load_raw_data(detDictList)
 
-    # Plot the data for each detector
-    for i  in range(len(detDictList)):
+    # Only plot the detectors with a signal
+    connectedDets = [detDict for detDict in detDictList if detDict['raw_node'] != 'nc']
 
-        detDict = detDictList[i]
+    fig, axes = plt.subplots(4, 5, figsize=(24, 16), sharex=True, layout='constrained')
+    fig.suptitle(f'Shot # {args.shotnum}, Ref. Shot # {args.ref_shotnum}', fontsize=20)
 
-        if detDict['raw_node'] == 'nc':
-            continue
-
-        fig = plt.figure(figsize=(12, 8), tight_layout=True)
-        ax = fig.add_subplot(111)
+    # Plot the data for each detector on its own panel
+    for ax, detDict in zip(axes.flat, connectedDets):
 
         # Plasma signal
         ax.plot(detDict['time_arr']*1e3, detDict['raw_signal']*1e3,
@@ -936,13 +934,21 @@ def plot_raw_data():
                 linewidth = 3,
                 label='Reference Signal')
         
-        ax.set_xlabel('Time [ms]')
-        ax.set_ylabel('Raw Signal [mA]')
-
         impactParam = np.round(detDict['impact_param_vertical']/10, 2)
-        ax.set_title(f'{args.shotnum} \n {impactParam}cm')
+        ax.set_title(f'{impactParam} cm')
 
-        plt.show()
+    # Hide any unused panels
+    for ax in axes.flat[len(connectedDets):]:
+        ax.set_visible(False)
+
+    fig.supxlabel('Time [ms]')
+    fig.supylabel('Raw Signal [mA]')
+
+    # Single legend for the whole figure
+    handles, labels = axes.flat[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='upper right', fontsize=14)
+
+    plt.show()
 
     return
 
@@ -1036,6 +1042,10 @@ def plot_data(detDictList, timesToPlot):
 
     ax.set_ylim(0, None)
     ax.set_xlim(-np.max(np.abs(impactParams*1e2))*1.1, np.max(np.abs(impactParams*1e2))*1.1)
+
+    savename = f'/home/sanwalka/shinethru/plots/{args.shotnum}_density_profile.png'
+    plt.savefig(savename, dpi=300)
+    logger.info(f'Saved figure to {savename}.')
 
     plt.show()
 
@@ -1183,10 +1193,12 @@ if __name__ == "__main__":
         logger.error(e)
 
     # Plot the NBI, SEE signals, and line integrated density for the central detector
-    plot_nbi_and_central_detector(savefig=True)
+    # plot_nbi_and_central_detector(savefig=True)
+
+    # plot_raw_data()
 
     # Times to plot the line integrated densities
     global timesToPlot
-    timesToPlot = np.array([4, 6, 8, 10, 12]) * 1e-3 # [seconds]
+    timesToPlot = np.array([4, 5, 6, 7]) * 1e-3 # [seconds]
 
     _ = run_post_process()

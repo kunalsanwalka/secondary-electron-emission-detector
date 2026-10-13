@@ -9,6 +9,7 @@ from the simulated edge density to 0 at the AXUV radius.
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
+import matplotlib.patheffects
 import pickle
 
 from pathlib import Path
@@ -862,7 +863,7 @@ def extend_2d_density(simulationName, shotnum, diodeArrayNum, simTimeToPlot,
         else:
             expTimeIdx = np.argmin(np.abs(axuvTimes - expTimeToPlot))
 
-        fig, (axMid, ax) = plt.subplots(2, 1, figsize=(14, 9), tight_layout=True)
+        fig, (axMid, ax) = plt.subplots(2, 1, figsize=(14, 9), layout='constrained')
 
         # Label the simulation by its neutral densities, falling back on its name if they
         # cannot be parsed out of it
@@ -873,9 +874,7 @@ def extend_2d_density(simulationName, shotnum, diodeArrayNum, simTimeToPlot,
         else:
             simLabel = simulationName
 
-        fig.suptitle(f'{simLabel}\nwith {shotnum} AXUV at '
-                     rf't$_{{Sim}}$ = {times[simTimeIdx]*1e3:.4g} ms and '
-                     rf't$_{{Exp}}$ = {axuvTimes[expTimeIdx]*1e3:.4g} ms')
+        fig.suptitle(f'{simLabel}\nwith {shotnum}')
 
         # Axial and radial extent of the plot
         zLim = (0, 0.8)
@@ -892,39 +891,57 @@ def extend_2d_density(simulationName, shotnum, diodeArrayNum, simTimeToPlot,
             ticks = mpl.ticker.MaxNLocator(nbins=5).tick_values(0, vmax)
             return ticks[ticks <= vmax]
 
-        # Line colors of the midplane profile, taken from the colormaps of the contour plots
-        simColor = mpl.colormaps[densCmap](0.6)
-        extColor = mpl.colormaps[extCmap](0.6)
+        # Axial positions the radial profiles are taken at, and the color of each [m]
+        zProfiles = (0.0, 0.8)
+        zColors = ('#2a78d6', '#eb6834')
 
-        #### Midplane profile
+        #### Radial profiles
 
-        # The outermost simulated point is prepended so that the extension joins onto the
-        # simulated profile
-        rExtMid = np.concatenate([[solrz[-1, 0]], rExtGrid])
-        densExtMidPlot = np.concatenate([[densSim[-1, 0]], densExtMid[expTimeIdx]])
+        for zProf, zColor in zip(zProfiles, zColors):
 
-        axMid.plot(solrz[:, 0], densSim[:, 0]/densScale,
-                   color=simColor,
-                   linewidth=3,
-                   label='Simulation')
-        axMid.plot(rExtMid, densExtMidPlot/densScale,
-                   color=extColor,
-                   linewidth=3,
-                   label='AXUV extension')
-        axMid.axvline(axuvRadius[expTimeIdx],
-                      color='black',
-                      linestyle='--',
-                      linewidth=1,
-                      label=f'AXUV plasma radius (DA{diodeArrayNum}), '
-                            f'a = {axuvRadius[expTimeIdx]*1e2:.4g} cm')
+            # The simulated flux surfaces each have their own axial grid, so each one is
+            # interpolated to zProf along its own length
+            rSimProf = np.array([np.interp(zProf, solzz[i], solrz[i]) for i in range(len(solrz))])
+            densSimProf = np.array([np.interp(zProf, solzz[i], densSim[i])
+                                    for i in range(len(solrz))])
+
+            # The density of the extension is constant along its flux surfaces, so only their
+            # radii change with z. The outermost simulated point is prepended so that the
+            # extension joins onto the simulated profile.
+            rExtProf = np.array([np.interp(zProf, zGrid, rExtMapped[k])
+                                 for k in range(len(rExtGrid))])
+            rExtProf = np.concatenate([[rSimProf[-1]], rExtProf])
+            densExtProf = np.concatenate([[densSimProf[-1]], densExtMid[expTimeIdx]])
+
+            axMid.plot(rSimProf, densSimProf/densScale,
+                       color=zColor,
+                       linewidth=3,
+                       label=f'z = {zProf:.2g} m')
+            axMid.plot(rExtProf, densExtProf/densScale,
+                       color=zColor,
+                       linestyle='--',  
+                       linewidth=3)
 
         axMid.set_xlim(rLim)
         axMid.set_ylim(0, None)
 
         axMid.set_xlabel('R [m]')
-        axMid.set_ylabel(r'Midplane n$_i$ ' + densUnits)
-        axMid.legend(loc='upper left')
-        axMid.grid(True)
+        axMid.set_ylabel(r'n$_i$ ' + densUnits)
+
+        # The z-positions are told apart by color, and the simulation and extension by line
+        # style, so the legend gets a key for the line styles as well
+        zHandles, zLabels = axMid.get_legend_handles_labels()
+        styleHandles = [mpl.lines.Line2D([], [], color='black', linewidth=3),
+                        mpl.lines.Line2D([], [], color='black', linewidth=3, linestyle='--')]
+        styleLabels = ['Simulation', 'AXUV extension']
+        axMid.legend(zHandles + styleHandles, zLabels + styleLabels, loc='best', ncols=2)
+
+        # The simulated and experimental times being plotted
+        axMid.text(0.02, 0.95,
+                   rf't$_{{Sim}}$ = {times[simTimeIdx]*1e3:.4g} ms' + '\n'
+                   rf't$_{{Exp}}$ = {axuvTimes[expTimeIdx]*1e3:.4g} ms',
+                   transform=axMid.transAxes, ha='left', va='top',
+                   bbox=dict(boxstyle='round', facecolor='white', edgecolor='0.8'))
 
         #### Simulated density
 
@@ -932,9 +949,6 @@ def extend_2d_density(simulationName, shotnum, diodeArrayNum, simTimeToPlot,
         simLevels = np.linspace(0, simMax, 100)
 
         simObj = ax.contourf(solzz, solrz, densSim/densScale, levels=simLevels, cmap=densCmap)
-
-        simCbar = fig.colorbar(simObj, ax=ax, ticks=round_ticks(simMax))
-        simCbar.set_label(r'Simulation n$_i$ ' + densUnits)
 
         #### Extension
 
@@ -953,13 +967,21 @@ def extend_2d_density(simulationName, shotnum, diodeArrayNum, simTimeToPlot,
         extObj = ax.contourf(zExtPlot, rExtPlot, densExtPlot/densScale, levels=extLevels,
                              cmap=extCmap)
 
-        extCbar = fig.colorbar(extObj, ax=ax, ticks=round_ticks(extMax))
-        extCbar.set_label(r'AXUV extension n$_i$ ' + densUnits)
-
         #### Flux surfaces
 
         plot_flux_surfaces(ax, extData['Rmesh'], extData['Zmesh'], extData['psi'], rLim[1],
                            fluxColor=fluxColor, numFluxSurfaces=numFluxSurfaces)
+
+        #### Axial positions of the radial profiles
+
+        # A line on the edge of the plot is hidden by the frame, so the lines are kept a little
+        # way inside it. This only moves where they are drawn, not where the profiles are taken.
+        # The black outline keeps them visible over every color of the contour plots.
+        zInset = 0.005 * (zLim[1] - zLim[0])
+        for zProf, zColor in zip(zProfiles, zColors):
+            ax.axvline(np.clip(zProf, zLim[0] + zInset, zLim[1] - zInset),
+                       color=zColor, linestyle='--', linewidth=5,
+                       path_effects=[mpl.patheffects.withStroke(linewidth=8, foreground='black')])
 
         ax.set_xlim(zLim)
         ax.set_ylim(rLim)
@@ -967,6 +989,23 @@ def extend_2d_density(simulationName, shotnum, diodeArrayNum, simTimeToPlot,
 
         ax.set_xlabel('Z [m]')
         ax.set_ylabel('R [m]')
+
+        #### Colorbars
+
+        # Horizontal and side by side below the contour plot, each half its width, so that
+        # the contour plot gets the full width of the figure
+        cbarGap = 0.04
+        cbarWidth = 0.5 - cbarGap/2
+        simCax = ax.inset_axes([0, -0.4, cbarWidth, 0.08])
+        extCax = ax.inset_axes([cbarWidth + cbarGap, -0.4, cbarWidth, 0.08])
+
+        simCbar = fig.colorbar(simObj, cax=simCax, orientation='horizontal',
+                               ticks=round_ticks(simMax))
+        simCbar.set_label(r'Simulation n$_i$ ' + densUnits)
+
+        extCbar = fig.colorbar(extObj, cax=extCax, orientation='horizontal',
+                               ticks=round_ticks(extMax))
+        extCbar.set_label(r'AXUV extension n$_i$ ' + densUnits)
 
         if saveplot:
             savePath = (f'/home/sanwalka/shinethru/plots/{shotnum}_{simulationName}_'
