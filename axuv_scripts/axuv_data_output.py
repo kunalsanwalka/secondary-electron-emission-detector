@@ -1,8 +1,8 @@
 from axuv_postprocessing.axuv_read import AXUV_Read
 from axuv_postprocessing.axuv_analysis import AXUV_analysis
 import argparse
+from pathlib import Path
 # --- user settings ---
-import argparse
 
 parser = argparse.ArgumentParser()
 
@@ -130,6 +130,9 @@ def rd_to_npz_dict(rd):
 
 # ---- save many shots for one diode (DA index or explicit key) ----
 
+outDir = Path(__file__).resolve().parent.parent / "data"
+outDir.mkdir(exist_ok=True)
+
 for j in range(len(selected_indices)):
     DA = selected_indices[j]
     out = {}
@@ -143,6 +146,9 @@ for j in range(len(selected_indices)):
         for k, v in d.items():
             out[f"s{sn}_{k}"] = v
     
-    np.savez("AXUV_results"+str(shotnum[0])+"_"+str(shotnum[-1])+"_DA"+str(DA)+".npz", **out)
-    print("Saved:", "AXUV_results"+str(shotnum[0])+"_"+str(shotnum[-1])+"_DA"+str(DA)+".npz")
+    # Always save to the data directory at the top level of the repository, regardless of
+    # where the script is run from
+    savePath = outDir / ("AXUV_results"+str(shotnum[0])+"_"+str(shotnum[-1])+"_DA"+str(DA)+".npz")
+    np.savez(savePath, **out)
+    print("Saved:", savePath)
 
