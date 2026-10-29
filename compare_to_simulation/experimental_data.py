@@ -878,6 +878,9 @@ def run_post_process():
     # Add error bars
     detDictList = calculate_line_integrated_density_errors(detDictList)
 
+    # Save the line integrated density profiles as .npz
+    density_profiles_to_npz(detDictList, timesToPlot)
+
     # Make a plot of the line integrated densities if debug is true
     if args.plot:
         plot_data(detDictList, timesToPlot)
@@ -952,7 +955,28 @@ def plot_raw_data():
 
     return
 
-def plot_data(detDictList, timesToPlot):
+def get_density_profiles(detDictList, timesToPlot):
+    """
+    Get the line integrated density profiles (vs. impact parameter) at each time in timesToPlot.
+
+    Detectors with no data are removed, the rest are sorted by impact parameter and the 1st detector (railed, broken) is removed.
+
+    Parameters
+    ----------
+    detDictList : list
+        List of dictionaries containing detector information.
+    timesToPlot : np.array
+        Times at which to get the density profiles [s].
+
+    Returns
+    -------
+    impactParams : np.array
+        Impact parameter of each detector [m].
+    densArr : np.array
+        Line integrated density at each time and detector, shape (len(timesToPlot), len(impactParams)) [m^-2].
+    densErrArr : np.array
+        1 sigma error bars on densArr [m^-2].
+    """
 
     # Detector impact parameters [m]
     impactParams = np.zeros(len(detDictList))
@@ -994,10 +1018,51 @@ def plot_data(detDictList, timesToPlot):
     densList = densList[1:]
     densErrList = densErrList[1:]
 
+    # Get the profiles at each time
+    densArr = np.zeros((len(timesToPlot), len(impactParams)))
+    densErrArr = np.zeros((len(timesToPlot), len(impactParams)))
+    for i in range(len(timesToPlot)):
+        for j in range(len(impactParams)):
+
+            timeIdx = np.abs(timeArr2D[j] - timesToPlot[i]).argmin()
+            densArr[i, j] = densList[j][timeIdx]
+            densErrArr[i, j] = densErrList[j][timeIdx]
+
+    return impactParams, densArr, densErrArr
+
+def density_profiles_to_npz(detDictList, timesToPlot):
+    """
+    Save the data used in plot_data() to /home/sanwalka/shinethru/data/{args.shotnum}_density_data.npz
+
+    Keys in the .npz file-
+    ['impact_params'] = Impact parameter of each detector [m].
+    ['times'] = Times at which the profiles are taken [s].
+    ['line_integrated_density'] = Shape (len(times), len(impact_params)) [m^-2].
+    ['line_integrated_density_sigma'] = 1 sigma error bars, same shape [m^-2].
+    """
+
+    impactParams, densArr, densErrArr = get_density_profiles(detDictList, timesToPlot)
+
+    savename = f'/home/sanwalka/shinethru/data/{args.shotnum}_density_data.npz'
+    np.savez(savename,
+             impact_params=impactParams,
+             times=timesToPlot,
+             line_integrated_density=densArr,
+             line_integrated_density_sigma=densErrArr)
+    logger.info(f'Saved density profiles to {savename}.')
+
+    return
+
+def plot_data(detDictList, timesToPlot):
+
+    impactParams, densArr, densErrArr = get_density_profiles(detDictList, timesToPlot)
+
     fig = plt.figure(figsize=(12, 8), tight_layout=True)
     ax = fig.add_subplot(111)
 
-    fig.suptitle(args.shotnum)
+    # Shot number above the top right corner of the axes
+    ax.text(1.0, 1.01, f'Shot #{args.shotnum}', transform=ax.transAxes,
+            ha='right', va='bottom')
 
     # Color each time point on a colormap
     cmap = plt.get_cmap('viridis', len(timesToPlot)).colors
@@ -1006,18 +1071,10 @@ def plot_data(detDictList, timesToPlot):
     for i in range(len(timesToPlot)):
 
         # Data to plot
-        densAtTime = []
-        densErrAtTime = []
-        for j in range(len(impactParams)):
+        densAtTime = densArr[i]
+        densErrAtTime = densErrArr[i]
 
-            timeIdx = np.abs(timeArr2D[j] - timesToPlot[i]).argmin()
-            densAtTime.append(densList[j][timeIdx])
-            densErrAtTime.append(densErrList[j][timeIdx])
-
-        densAtTime = np.array(densAtTime)
-        densErrAtTime = np.array(densErrAtTime)
-
-        ax.errorbar(impactParams*1e2, densAtTime, 
+        ax.errorbar(impactParams*1e2, densAtTime,
                     yerr=densErrAtTime,
                     fmt='o',
                     ms=10,
@@ -1185,9 +1242,7 @@ if __name__ == "__main__":
     try:
         # Use the TkAgg backend for matplotlib to avoid issues with plotting in some environments
         plt.switch_backend('TkAgg')
-
-        # Bigger font size for all plots
-        plt.rcParams.update({'font.size' : 22})
+        plt.rcParams.update({'font.size': 28})
 
     except Exception as e:
         logger.error(e)
@@ -1199,6 +1254,6 @@ if __name__ == "__main__":
 
     # Times to plot the line integrated densities
     global timesToPlot
-    timesToPlot = np.array([4, 5, 6, 7]) * 1e-3 # [seconds]
+    timesToPlot = np.array([4, 5, 6, 7, 8]) * 1e-3 # [seconds]
 
     _ = run_post_process()

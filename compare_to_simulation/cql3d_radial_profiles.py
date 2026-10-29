@@ -14,6 +14,8 @@ from cql3d_vs_data import time_dependent_see_detector_extended
 from cql3d_vs_data import find_simulation_names, find_valid_time_slices, maxIonDensity
 from cql3d_vs_data import parse_simulation_name, density_label
 
+plt.rcParams.update({'font.size': 28})
+
 # Global variable to store the simulation scan directory
 global simulationScanDir
 simulationScanDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/withRadialDiff/'
@@ -374,13 +376,13 @@ def plot_radial_and_synthetic(simulationName, shotnum, timesToPlotSim, timesToPl
 
     ax2.set_title(f'Shot #{shotnum}', loc='right')
 
-    # Label the top panel with the neutral densities of the simulation
+    # Label the bottom panel with the neutral densities of the simulation
     mainVesselDens, gasBoxDens = parse_simulation_name(simulationName)
     if mainVesselDens is not None:
         densText = (f'Gas Box '+r'$n_n$'+f': {density_label(gasBoxDens)}\n'
                     f'Main Vessel '+r'$n_n$'+f': {density_label(mainVesselDens)}')
-        ax2.text(0.98, 0.05, densText,
-                 transform=ax2.transAxes,
+        ax1.text(0.98, 0.05, densText,
+                 transform=ax1.transAxes,
                  ha='right', va='bottom',
                  bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
@@ -762,6 +764,27 @@ def load_eqdsk_flux(simulationName):
 
     filenameEQDSK = resultsDir + lastSimTime + '/components/eq__pleiades_3/eqdsk'
 
+    return read_eqdsk_flux(filenameEQDSK)
+
+def read_eqdsk_flux(filenameEQDSK):
+    """
+    Read the poloidal flux from the given eqdsk file.
+
+    Parameters
+    ----------
+    filenameEQDSK : str
+        Location of the eqdsk file.
+
+    Returns
+    -------
+    Rmesh : np.array
+        2D array of the radial coordinates of the eqdsk grid. [m]
+    Zmesh : np.array
+        2D array of the axial coordinates of the eqdsk grid. [m]
+    psi : np.array
+        2D array of the poloidal flux on the eqdsk grid. [Wb]
+    """
+
     with open(filenameEQDSK, 'r') as eqdskFile:
         lines = eqdskFile.read().splitlines()
 
@@ -912,27 +935,28 @@ if __name__ == "__main__":
     # plot_radial_and_synthetic(simName, shotnum, timesToPlotSim, timesToPlotExp,
     #                           useExtension=True, diodeArrayNum=1, rateKHz=10.0)
 
-    # plot_radial_and_synthetic(simName, shotnum, timesToPlotSim, timesToPlotExp,
-    #                                        useExtension=True, diodeArrayNum=1, rateKHz=10.0, 
-    #                                        saveplot=True, detectorsToDrop=detectorToDrop)
+    plot_radial_and_synthetic(simName, shotnum, timesToPlotSim, timesToPlotExp,
+                                           useExtension=True, diodeArrayNum=1, rateKHz=10.0, 
+                                           saveplot=True, detectorsToDrop=detectorToDrop)
     # times, synInf = synthetic_interferometer(simName, makeplot=True)
 
-    simName1 = 'nneut_3e16_gb_1e18_NBI_800kW_ECH_0kW_ionDrrOn'
-    simName2 = 'nneut_1e15_gb_1e18_NBI_800kW_ECH_0kW_ionDrrOn'
-    shotnum1 = 260709061
-    shotnum2 = 261012050
-    expTime1 = 7.83e-3
-    expTime2 = 7.83e-3
-    simTime1 = 3e-3
-    simTime2 = 3e-3
-    withThomson1 = True
-    withThomson2 = False
-    detectorsToDrop1 = [15]
-    detectorsToDrop2 = [9, 13, 15]
-    useExtension = True
+    # # Compare the profiles from the pre and post Ti gettering simulations
+    # simName1 = 'nneut_3e16_gb_1e18_NBI_800kW_ECH_0kW_ionDrrOn'
+    # simName2 = 'nneut_1e15_gb_1e18_NBI_800kW_ECH_0kW_ionDrrOn'
+    # shotnum1 = 260709061
+    # shotnum2 = 261012050
+    # expTime1 = 7.83e-3
+    # expTime2 = 7.83e-3
+    # simTime1 = 3e-3
+    # simTime2 = 3e-3
+    # withThomson1 = True
+    # withThomson2 = False
+    # detectorsToDrop1 = [15]
+    # detectorsToDrop2 = [9, 13, 15]
+    # useExtension = True
 
-    plot_profile_comparison(simName1, simName2, shotnum1, shotnum2, expTime1, expTime2,
-                            simTime1, simTime2, withThomson1, withThomson2,
-                            detectorsToDrop1, detectorsToDrop2,
-                            useExtension, diodeArrayNum=1, rateKHz=10.0,
-                            tanhSteepness=4.0, redoAnalysis=False, saveplot=False)
+    # plot_profile_comparison(simName1, simName2, shotnum1, shotnum2, expTime1, expTime2,
+    #                         simTime1, simTime2, withThomson1, withThomson2,
+    #                         detectorsToDrop1, detectorsToDrop2,
+    #                         useExtension, diodeArrayNum=1, rateKHz=10.0,
+    #                         tanhSteepness=4.0, redoAnalysis=False, saveplot=True)
