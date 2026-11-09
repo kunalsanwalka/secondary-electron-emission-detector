@@ -16,7 +16,7 @@ from cql3d_vs_data import find_valid_time_slices, parse_simulation_name, density
 from cql3d_radial_profiles import read_eqdsk_flux
 
 # Set after the imports, as kn1dc_parser and cql3d_vs_data set their own font size when imported
-plt.rcParams.update({'font.size': 20})
+plt.rcParams.update({'font.size': 22})
 
 # Global variable to store the simulation scan directory
 simulationScanDir = '/mnt/n/whamdata/sanwalka/ips_runs/findGasBoxDensity/withRadialDiff/'
@@ -193,6 +193,32 @@ def tau_collisionless(Ti, dens, mirrorRatio):
     TieV = Ti * 1e3
 
     return 2e12 * TieV**1.5 / dens * np.log10(mirrorRatio)
+
+def tau_slowing(Te, dens):
+    """
+    Spitzer slowing down time of fast ions on electrons,
+    tau_s = 3 * (2*pi)^(3/2) * eps0^2 * m_i * (k_B * T_e)^(3/2) / (e^4 * sqrt(m_e) * n_e * lnLambda).
+
+    Calculated for deuterium with lnLambda = 15.
+
+    Parameters
+    ----------
+    Te : np.array
+        Electron temperature. [keV]
+    dens : np.array
+        Electron density, equal to the ion density for deuterium. [m^-3]
+
+    Returns
+    -------
+    tau : np.array
+        Slowing down time. [s]
+    """
+
+    # [keV] to [J]
+    TeJoules = Te * 1e3 * sc.constants.e
+
+    return (3 * (2*np.pi)**1.5 * sc.constants.epsilon_0**2 * massD * TeJoules**1.5
+            / (sc.constants.e**4 * np.sqrt(sc.constants.m_e) * dens * 15))
 
 def plot_taup_dens_ti(simName, timeToPlot, coldFrac=None, linestyle='-', label=None, axes=None,
                       makeplot=True, saveplot=False):
@@ -476,7 +502,8 @@ def plot_distribution_function(simName, timeToPlot, eMax=30.0, numDecades=8, cma
 
     CQL3D only saves the distribution function at the end of each IPS timestep, so the IPS
     timestep that ends closest to timeToPlot is used. See load_distribution_function(). The
-    trapped-passing (loss cone) boundary is overlaid in white.
+    trapped-passing (loss cone) boundary is overlaid in white. As the distribution function is
+    symmetric in v_par, only v_par >= 0 is shown.
 
     Parameters
     ----------
@@ -523,8 +550,7 @@ def plot_distribution_function(simName, timeToPlot, eMax=30.0, numDecades=8, cma
     logF = np.log10(np.clip(distFunc['f'][xIdx], a_min=1e-300, a_max=None))
     levels = np.linspace(logF.max() - numDecades, logF.max(), 100)
 
-    fig = plt.figure(figsize=(12, 7), tight_layout=True)
-    fig.suptitle(simName)
+    fig = plt.figure(figsize=(9, 7), tight_layout=True)
     ax = fig.add_subplot(1, 1, 1)
 
     pltObj = ax.contourf(vPar/1e6, vPerp/1e6, logF, levels=levels, cmap=cmap, extend='min')
@@ -534,18 +560,33 @@ def plot_distribution_function(simName, timeToPlot, eMax=30.0, numDecades=8, cma
     # Ticks on whole decades
     cbar.set_ticks(np.arange(np.ceil(levels[0]), np.floor(levels[-1]) + 1))
 
-    # Loss cone boundaries
-    for idx in (distFunc['itl'], distFunc['itu']):
-        ax.plot([0, vMax*np.cos(y[idx-1])/1e6], [0, vMax*np.sin(y[idx-1])/1e6],
-                color='white', linewidth=2, linestyle='--')
+    # Loss cone boundary. Only the lower one (itl) is at v_par > 0.
+    idx = distFunc['itl']
+    ax.plot([0, vMax*np.cos(y[idx-1])/1e6], [0, vMax*np.sin(y[idx-1])/1e6],
+            color='white', linewidth=2, linestyle='--')
 
-    ax.set_xlim(-vMax/1e6, vMax/1e6)
+    # Use the ticks of the x-axis on both axes. Setting the ticks can expand the limits, so the
+    # limits are set afterwards.
+    ax.set_xlim(0, vMax/1e6)
+    ticks = ax.get_xticks()
+    ax.set_xticks(ticks)
+    ax.set_yticks(ticks)
+    ax.set_xlim(0, vMax/1e6)
     ax.set_ylim(0, vMax/1e6)
     ax.set_aspect('equal')
 
     ax.set_xlabel(r'v$_\parallel$ [10$^6$ m/s]')
     ax.set_ylabel(r'v$_\perp$ [10$^6$ m/s]')
-    ax.set_title(f'Time = {distFunc["time"]*1e3:.2f} ms, R = {distFunc["radius"]*1e2:.2f} cm')
+
+    # Label the plot with the neutral densities of the simulation
+    mainVesselDens, gasBoxDens = parse_simulation_name(simName)
+    if mainVesselDens is not None:
+        densText = (f'Gas Box '+r'$n_n$'+f': {density_label(gasBoxDens)}\n'
+                    f'Main Vessel '+r'$n_n$'+f': {density_label(mainVesselDens)}')
+        ax.text(0.98, 0.98, densText,
+                transform=ax.transAxes,
+                ha='right', va='top',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=1))
 
     if saveplot:
         savePath = f'/home/sanwalka/shinethru/plots/{simName}_ion_distribution.png'
@@ -1082,11 +1123,11 @@ if __name__ == '__main__':
 
     # plot_taup_dens_ti(simName, timeToPlot, coldFrac=coldFrac, makeplot=True, saveplot=True)
 
-    # plot_distribution_function(simName, timeToPlot, makeplot=True, saveplot=False)
+    plot_distribution_function(simName, timeToPlot, makeplot=True, saveplot=True)
 
-    distFunc = load_distribution_function(simName, timeToPlot)
-    fCold, fHot = split_f(distFunc['vPerp'], distFunc['vPar'], distFunc['f'], coldFrac=0.26,
-                          simName=simName, makeplot=True, saveplot=True)
+    # distFunc = load_distribution_function(simName, timeToPlot)
+    # fCold, fHot = split_f(distFunc['vPerp'], distFunc['vPar'], distFunc['f'], coldFrac=0.26,
+    #                       simName=simName, makeplot=True, saveplot=True)
 
     # plot_temp_vs_cold_frac(simName, timeToPlot, makeplot=True, saveplot=False)
 
